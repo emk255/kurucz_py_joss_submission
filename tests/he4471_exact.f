@@ -1,0 +1,428 @@
+      PROGRAM TEST_HE4471
+      PARAMETER (kw=99,mw=139,mw6=mw*6)
+      COMMON /STATE/P(kw),XNE(kw),XNATOM(kw),RHO(kw),PTOTAL(kw)
+      COMMON /TEMP/T(kw),TKEV(kw),TK(kw),HKT(kw),TLOG(kw),HCKT(kw),ITEMP
+      COMMON /XNFDOP/XNFPEL(mw6),DOPPLE(mw6),XNFDOP(mw6)
+      COMMON /BHE/BHE1(kw,29),AHE1(kw),SHE1(kw),BHE2(kw,6),AHE2(kw),
+     1            SHE2(kw),AHEMIN(kw),SIGHE(kw),XNFPHE(kw,3),XNFHE(kw,2)
+      COMMON /BHYD/BHYD(kw,8),AHYD(kw),SHYD(kw),AH2P(kw),BMIN(kw),
+     1             AHMIN(kw),SHMIN(kw),SIGH(kw),SIGH2(kw),AHLINE(kw),
+     2             SHLINE(kw),XNFPH(kw,2),XNFH(kw)
+      CALL TABVOIGT(200.,2001)
+      DO 10 J=1,kw
+        T(J)=8000.
+        XNE(J)=1.E13
+        P(J)=1.E5
+        RHO(J)=1.E-7
+        XNFPH(J,2)=0.
+        XNFHE(J,2)=0.
+  10  CONTINUE
+      J=1
+      WAVE=447.1
+      WL=447.1
+      DOPPLE(7)=1.E-4
+      DOPWL=DOPPLE(7)*WL
+      RES=HE4471(J,WAVE,WL,DOPWL)
+      WRITE(6,100) WAVE,RES
+  100 FORMAT('He I 4471 at ',F8.3,' nm: profile = ',1PE16.8)
+      END
+
+      FUNCTION HE4471(J,WAVE,WL,DOPWL)
+      PARAMETER (kw=99,mw=139,mw6=mw*6)
+      DIMENSION WS(4),DS(4),ALFS(4),FORB1(4),FORB2(4),TS(4)
+      COMMON /STATE/P(kw),XNE(kw),XNATOM(kw),RHO(kw),PTOTAL(kw)
+      COMMON /TEMP/T(kw),TKEV(kw),TK(kw),HKT(kw),TLOG(kw),HCKT(kw),ITEMP
+      COMMON /XNFDOP/XNFPEL(mw6),DOPPLE(mw6),XNFDOP(mw6)
+      COMMON /BHE/BHE1(kw,29),AHE1(kw),SHE1(kw),BHE2(kw,6),AHE2(kw),
+     1            SHE2(kw),AHEMIN(kw),SIGHE(kw),XNFPHE(kw,3),XNFHE(kw,2)
+      COMMON /BHYD/BHYD(kw,8),AHYD(kw),SHYD(kw),AH2P(kw),BMIN(kw),
+     1             AHMIN(kw),SHMIN(kw),SIGH(kw),SIGH2(kw),AHLINE(kw),
+     2             SHLINE(kw),XNFPH(kw,2),XNFH(kw)
+c      REAL*8 WL,wave
+C     STANDARD ISOLATED LINE BROADENING PARAMETERS
+c	From Barnard,Cooper and Smith J.Q.S.R.T. 14,1025,1974
+c	ws=we(A),ds=de/we, alfs=alpha; data for Ne=10**13 cm(-3)
+      DATA WS/0.001460,0.001269,0.001079,0.000898/
+      DATA DS/0.036,-0.005,-0.026,-0.034/
+      DATA ALFS/0.107,0.119,0.134,0.154/
+      DATA DEN/1.0E13/
+c        data forb1/?,7.66E-3,9.04E-3,1.01E-2/ ????
+      DATA FORB1/0.,0.,0.,0./
+      DATA FORB2/0.,0.,0.,0./
+C     NANOMETERS
+      DATA DLP/0.021/
+      DATA DLF1/-0.150/
+      DATA DLF2/0./
+      DATA TS/ 5.0E3,1.0E4,2.0E4,4.0E4/
+      HE4471=0.
+      E=XNE(J)
+      TEMP=T(J)
+C     NUMERO PROTONI=N(H+)/U(H+)  U(H+)=1
+      XNFHP=XNFPH(J,2)
+      XNFHEP=XNFHE(J,2)
+      DL=WAVE-WL
+      TEMP=AMAX1(TEMP,5.0E3)
+      TEMP=AMIN1(TEMP,4.0E4)
+      IFORB=0.
+      DO 10 IT=1,4
+      IF(FORB1(IT).LE.0.)GO TO 10
+      IFORB=1
+   10 CONTINUE
+      IF(E.LE.1.0E13)GO TO 499
+      CALL READBCS(1,J,TEMP,XNFHP,XNFHEP,E,DL,PHIHE)
+      HE4471=1.772453*PHIHE*DOPWL*10.
+      RETURN
+  499 CONTINUE
+      DO 2 I=2,4
+      IT=I
+      IF(TS(I).GT.TEMP)GO TO 3
+    2 CONTINUE
+    3 X=(TEMP-TS(IT-1))/(TS(IT)-TS(IT-1))
+      XX=E/DEN
+C     DAMPING WIDTH
+      W=XX*(X*WS(IT)+(1.0-X)*WS(IT-1))
+C     RATIO OF SHIFT TO WIDTH
+      D=X*DS(IT)+(1.0-X)*DS(IT-1)
+C     ION BROADENING PARAMETER
+      ALF=XX**0.25*(X*ALFS(IT)+(1.0-X)*ALFS(IT-1))
+C     FORBIDDEN COMPONENTS INTENSITIES
+      F1=XX*(X*FORB1(IT)+(1.0-X)*FORB1(IT-1))
+      F2=XX*(X*FORB2(IT)+(1.0-X)*FORB2(IT-1))
+C     RECIPROCAL PERTURBER VELOCITY
+C     KM!
+      XX=XNFHP/E
+      VM1=8.78E0*(XX+2.0*(1.0-XX))/SQRT(TEMP)
+C     MEAN INTERPARTICLE DISTANCE
+      RHOM=1.0/(4.19*E)**(1.0/3.0)
+C     ION VELOCITY PARAMETER
+      SIGMA=1.885E14*W*RHOM*VM1/(WL*10.)**2
+C     1.885E14=2*PAI*C*1.E8 1.E8 TRASFORMA RHOM DA CM ad A
+      X=ALF**(8.0/9.0)/SIGMA**(1.0/3.0)
+C     TOTAL WIDTHIS ANGSTROMS, then in nm
+      WTOT=W*(1.0+1.36*X)
+      wtot=wtot*0.1
+C     TOTAL SHIFT IN ANGSTROM, then in nm
+      DTOT=W*D*(1.0+2.36*X/ABS(D))
+      dtot=dtot*0.1
+C     VOIGT PARAMETERS
+      A=WTOT/DOPWL
+C     NORMALIZATION CONSTANT
+c     CON=0.564189583547756E0/(1.0+F1+F2)/(DOPPLE(7)*WL4)
+      con=1.
+      WWD=WAVE-WL-DTOT
+C     ALLOW FOR FINE STRUCTURE SPLITTING
+      HE4471=VOIGT(ABS(WWD-.0184)/DOPWL,A)/9.+
+     1       VOIGT(ABS(WWD+.0013)/DOPWL,A)/12.+
+     2       VOIGT(ABS(WWD+.0010)/DOPWL,A)/4.+
+     3       VOIGT(ABS(WWD+.0029)/DOPWL,A)/180.+
+     4       VOIGT(ABS(WWD+.0025)/DOPWL,A)*11./20.
+      IF(F1.LE.0) GO TO 4
+C     ADD IN P TO F FORBIDDEN COMPONENT
+      V=ABS((WAVE-WL)-DLF1)/DOPWL
+      HE4471=HE4471+F1*VOIGT(V,A)
+      IF(F2.LE.0) GO TO 4
+C     ADD P TO G FORBIDDEN COMPONENT
+      V=ABS((WAVE-WL)-DLF2)/DOPWL
+      HE4471=HE4471+F2*VOIGT(V,A)
+    4 HE4471=HE4471*CON
+C     TYPE*,HE4471
+      RETURN
+      END
+
+      FUNCTION VOIGT(V,A)
+      COMMON /H1TAB/H0TAB(2001),H1TAB(2001),H2TAB(2001)
+      IV=V*200.+1.5
+      IF(A.LT..2)GO TO 10
+      IF(A.GT.1.4)GO TO 2
+      IF(A+V.GT.3.2)GO TO 2
+      VV=V*V
+      HH1=H1TAB(IV)+H0TAB(IV)*1.12838
+      HH2=H2TAB(IV)+HH1*1.12838-H0TAB(IV)
+      HH3=(1.-H2TAB(IV))*.37613-HH1*.66667*VV+HH2*1.12838
+      HH4=(3.*HH3-HH1)*.37613+H0TAB(IV)*.66667*VV*VV
+      VOIGT=((((HH4*A+HH3)*A+HH2)*A+HH1)*A+H0TAB(IV))*
+     1      (((-.122727278D0*A+.532770573D0)*A-.96284325D0)*A+
+     2         .979895032D0)
+      RETURN
+    2 AA=A*A
+      VV=V*V
+      U=(AA+VV)*1.4142
+      VOIGT=A*.79788/U
+      IF(A.GT.100.)RETURN
+      AAU=AA/U
+      VVU=VV/U
+      UU=U*U
+      VOIGT=
+     A((((AAU-10.*VVU)*AAU*3.+15.*VVU*VVU)+3.*VV-AA)/UU+1.)*VOIGT
+      RETURN
+   10 IF(V.GT.10.)GO TO 12
+   11 VOIGT=(H2TAB(IV)*A+H1TAB(IV))*A+H0TAB(IV)
+      RETURN
+   12 VOIGT=.5642*A/V**2
+      RETURN
+      END
+
+      SUBROUTINE TABVOIGT(VSTEPS,N)
+      COMMON /H1TAB/H0TAB(2001),H1TAB(2001),H2TAB(2001)
+      DIMENSION TABVI(81),TABH1(81)
+      DATA TABVI/0.,.1,.2,.3,.4,.5,.6,.7,.8,.9,1.,1.1,1.2,1.3,1.4,1.5,
+     11.6,1.7,1.8,1.9,2.,2.1,2.2,2.3,2.4,2.5,2.6,2.7,2.8,2.9,3.,3.1,3.2,
+     2 3.3,3.4,3.5,3.6,3.7,3.8,3.9,4.0,4.2,4.4,4.6,4.8,5.0,5.2,5.4,5.6,
+     3 5.8,6.0,6.2,6.4,6.6,6.8,7.0,7.2,7.4,7.6,7.8,8.0,8.2,8.4,8.6,8.8,
+     4 9.0,9.2,9.4,9.6,9.8,10.0,10.2,10.4,10.6,10.8,11.0,11.2,11.4,11.6,
+     5 11.8,12.0/
+      DATA TABH1/-1.12838,-1.10596,-1.04048,-.93703,-.80346,-.64945,
+     1-.48552,-.32192,-.16772,-.03012,.08594,.17789,.24537,.28981,
+     2.31394,.32130,.31573,.30094,.28027,.25648,.231726,.207528,.184882,
+     3.164341,.146128,.130236,.116515,.104739,.094653,.086005,.078565,
+     4 .072129,.066526,.061615,.057281,.053430,.049988,.046894,.044098,
+     5 .041561,.039250,.035195,.031762,.028824,.026288,.024081,.022146,
+     6 .020441,.018929,.017582,.016375,.015291,.014312,.013426,.012620,
+     7 .0118860,.0112145,.0105990,.0100332,.0095119,.0090306,.0085852,
+     8 .0081722,.0077885,.0074314,.0070985,.0067875,.0064967,.0062243,
+     9 .0059688,.0057287,.0055030,.0052903,.0050898,.0049006,.0047217,
+     T .0045526,.0043924,.0042405,.0040964,.0039595/
+      DO 1 I=1,N
+    1 H0TAB(I)=FLOAT(I-1)/VSTEPS
+      CALL MAP1(TABVI,TABH1,81,H0TAB,H1TAB,N)
+      DO 2 I=1,N
+      VV=(FLOAT(I-1)/VSTEPS)**2
+      H0TAB(I)=EXP(-VV)
+    2 H2TAB(I)=H0TAB(I)-(VV+VV)*H0TAB(I)
+      RETURN
+      END
+
+      SUBROUTINE MAP1(XOLD,FOLD,NOLD,XNEW,FNEW,NNEW)
+      DIMENSION XOLD(1),FOLD(1),XNEW(1),FNEW(1)
+      L=2
+      LL=0
+      DO 50 K=1,NNEW
+   10 IF(XNEW(K).LT.XOLD(L))GO TO 20
+      L=L+1
+      IF(L.GT.NOLD)GO TO 30
+      GO TO 10
+   20 IF(L.EQ.LL)GO TO 50
+      IF(L.EQ.2)GO TO 30
+      L1=L-1
+      IF(L.GT.LL+1.OR.L.EQ.3)GO TO 21
+      CBAC=CFOR
+      BBAC=BFOR
+      ABAC=AFOR
+      IF(L.EQ.NOLD)GO TO 22
+      GO TO 25
+   21 L2=L-2
+      D=(FOLD(L1)-FOLD(L2))/(XOLD(L1)-XOLD(L2))
+      CBAC=FOLD(L)/((XOLD(L)-XOLD(L1))*(XOLD(L)-XOLD(L2)))+
+     1(FOLD(L2)/(XOLD(L)-XOLD(L2))-FOLD(L1)/(XOLD(L)-XOLD(L1)))/
+     2(XOLD(L1)-XOLD(L2))
+      BBAC=D-(XOLD(L1)+XOLD(L2))*CBAC
+      ABAC=FOLD(L2)-XOLD(L2)*D+XOLD(L1)*XOLD(L2)*CBAC
+      IF(L.LT.NOLD)GO TO 25
+   22 C=CBAC
+      B=BBAC
+      A=ABAC
+      LL=L
+      GO TO 50
+   25 D=(FOLD(L)-FOLD(L1))/(XOLD(L)-XOLD(L1))
+      CFOR=FOLD(L+1)/((XOLD(L+1)-XOLD(L))*(XOLD(L+1)-XOLD(L1)))+
+     1(FOLD(L1)/(XOLD(L+1)-XOLD(L1))-FOLD(L)/(XOLD(L+1)-XOLD(L)))/
+     2(XOLD(L)-XOLD(L1))
+      BFOR=D-(XOLD(L)+XOLD(L1))*CFOR
+      AFOR=FOLD(L1)-XOLD(L1)*D+XOLD(L)*XOLD(L1)*CFOR
+      WT=0.
+      IF(ABS(CFOR).NE.0.)WT=ABS(CFOR)/(ABS(CFOR)+ABS(CBAC))
+      A=AFOR+WT*(ABAC-AFOR)
+      B=BFOR+WT*(BBAC-BFOR)
+      C=CFOR+WT*(CBAC-CFOR)
+      LL=L
+      GO TO 50
+   30 IF(L.EQ.LL)GO TO 50
+      L=AMIN0(NOLD,L)
+      C=0.
+      B=(FOLD(L)-FOLD(L-1))/(XOLD(L)-XOLD(L-1))
+      A=FOLD(L)-XOLD(L)*B
+      LL=L
+   50 FNEW(K)=A+(B+C*XNEW(K))*XNEW(K)
+      RETURN
+      END
+
+      SUBROUTINE READBCS(LINE,J,TEMP,XNFHP,XNFHEP,XNE,DLNM,PHIHE)
+C     LINE=1 4471
+C     LINE=2 4026
+C     LINE=3 4387
+C     LINE=4 4921
+      PARAMETER (kw=99)
+      COMMON /TEMP/T(kw),TKEV(kw),TK(kw),HKT(kw),TLOG(kw),HCKT(kw),ITEMP
+      CHARACTER*8 TITLE1,TITLE2
+      DIMENSION DLAM(204,4),PHI(8),PHIHP(4,7,142),PHIHEP(4,7,142)
+      DIMENSION PHILAM(204),PHI4026(4,8,196),PHI4387(4,8,204)
+      DIMENSION PHI4921(4,7,142)
+      DIMENSION NDLAM(4),NXNE(4),XNE1(4)
+      DATA NDLAM/142,196,204,142/
+      DATA NXNE/7,8,8,7/
+      DATA XNE1/13.,14.,14.,13./
+      DATA ITEMP1/0/
+      IF(DLAM(1,1).EQ.-150.)GO TO 10
+      OPEN(UNIT=18,FORM='FORMATTED',STATUS='OLD',READONLY,SHARED)
+C     4471
+      READ(18,1) TITLE1
+      READ(18,1) TITLE2
+    1 FORMAT(A80)
+      DO 22 IL=1,142
+      DO 20 NE=1,7
+      READ(18,34)FNE,DWL,(PHI(I),I=1,8)
+   34 FORMAT(1X,F5.1,F8.2,8F7.3)
+      DO 21 IT=1,4
+      PHIHP(IT,NE,IL)=PHI(IT)
+   21 PHIHEP(IT,NE,IL)=PHI(IT+4)
+   20 CONTINUE
+   22 DLAM(IL,1)=DWL-150.
+C     4026
+      READ(18,1)TITLE1
+      READ(18,1)TITLE2
+      DO 32 IL=1,196
+      DO 30 NE=1,8
+      READ(18,34)FNE,DWL,(PHI4026(IT,NE,IL),IT=1,4)
+   30 CONTINUE
+   32 DLAM(IL,2)=DWL-150.
+C     4387
+      READ(18,1)TITLE1
+      READ(18,1)TITLE2
+      DO 35 IL=1,204
+      DO 33 NE=1,8
+      READ(18,34)FNE,DWL,(PHI4387(IT,NE,IL),IT=1,4)
+   33 CONTINUE
+   35 DLAM(IL,3)=DWL-150.
+C     4921
+      READ(18,1) TITLE1
+      READ(18,1) TITLE2
+      DO 45 IL=1,142
+      DO 43 NE=1,7
+      READ(18,34)FNE,DWL,(PHI(I),I=1,8)
+      DO 46 IT=1,4
+      PHIHP(IT,NE,IL)=PHI(IT)
+   46 PHIHEP(IT,NE,IL)=PHI(IT+4)
+   43 CONTINUE
+   45 DLAM(IL,4)=DWL-150.
+      CLOSE(UNIT=18)
+      JSAVE=0
+C
+   10 IF(J*LINE.EQ.JSAVE)GO TO 550
+C     TEMPERATURE AND IONS DENSITY INTERPOLATION
+      AT=LOG10(TEMP)
+      BT=(AT-3.698970)/.3010300+1.
+      IT=BT+0.00001
+      IT=MAX(MIN(IT,3),1)
+      WT=BT-IT
+      AP=LOG10(XNE)
+      AP=MAX(XNE1(LINE),AP)
+      BP=(AP-XNE1(LINE))/0.5+1.
+      IP=BP+0.00001
+      IP=MAX(MIN(IP,NXNE(LINE)-1),1)
+      WP=BP-IP
+      C1W1W=(1.-WP)*(1.-WT)
+      C1WW=(1.-WP)*WT
+      CW1W=WP*(1.-WT)
+      CWW=WP*WT
+      GO TO (410,420,430,440),LINE
+  410 XXH=XNFHP/XNE
+      XXHE=XNFHEP/XNE
+      DO 411 I=1,NDLAM(LINE)
+  411 PHILAM(I)=XXH*10.**(C1W1W*PHIHP(IT  ,IP  ,I)+
+     1                     C1WW*PHIHP(IT+1,IP  ,I)+
+     2                     CW1W*PHIHP(IT  ,IP+1,I)+
+     3                      CWW*PHIHP(IT+1,IP+1,I))+
+     4        XXHE*10.**(C1W1W*PHIHEP(IT  ,IP  ,I)+
+     5                    C1WW*PHIHEP(IT+1,IP  ,I)+
+     6                    CW1W*PHIHEP(IT  ,IP+1,I)+
+     7                     CWW*PHIHEP(IT+1,IP+1,I))
+      GO TO 502
+  420 DO 421 I=1,NDLAM(LINE)
+  421 PHILAM(I)=10.**(C1W1W*PHI4026(IT  ,IP  ,I)+
+     1                 C1WW*PHI4026(IT+1,IP  ,I)+
+     2                 CW1W*PHI4026(IT  ,IP+1,I)+
+     3                  CWW*PHI4026(IT+1,IP+1,I))
+      GO TO 502
+  430 DO 431 I=1,NDLAM(LINE)
+  431 PHILAM(I)=10.**(C1W1W*PHI4387(IT  ,IP  ,I)+
+     1                 C1WW*PHI4387(IT+1,IP  ,I)+
+     2                 CW1W*PHI4387(IT  ,IP+1,I)+
+     3                  CWW*PHI4387(IT+1,IP+1,I))
+      GO TO 502
+  440 XXH=XNFHP/XNE
+      XXHE=XNFHEP/XNE
+      DO 441 I=1,NDLAM(LINE)
+  441 PHILAM(I)=XXH*10.**(C1W1W*PHIHP(IT  ,IP  ,I)+
+     1                     C1WW*PHIHP(IT+1,IP  ,I)+
+     2                     CW1W*PHIHP(IT  ,IP+1,I)+
+     3                      CWW*PHIHP(IT+1,IP+1,I))+
+     4        XXHE*10.**(C1W1W*PHIHEP(IT  ,IP  ,I)+
+     5                    C1WW*PHIHEP(IT+1,IP  ,I)+
+     6                    CW1W*PHIHEP(IT  ,IP+1,I)+
+     7                     CWW*PHIHEP(IT+1,IP+1,I))
+  502 CALL INTEG(DLAM(1,LINE),PHILAM,PHINORM,NDLAM(LINE),0.)
+      DO 503 I=1,NDLAM(LINE)
+  503 PHILAM(I)=LOG10(PHILAM(I)/PHINORM)
+      JSAVE=J*LINE
+C
+C     NOW DLAM INTERPOLATION
+  550 DL=DLNM*10.
+      DO 600 I=2,NDLAM(LINE)
+      IF(DL.GT.DLAM(I,LINE).AND.I.LT.NDLAM(LINE))GO TO 600
+      A=(DLAM(I,LINE)-DL)/(DLAM(I,LINE)-DLAM(I-1,LINE))
+      B=(DL-DLAM(I-1,LINE))/(DLAM(I,LINE)-DLAM(I-1,LINE))
+      PHIHE=10.**(A*PHILAM(I-1)+B*PHILAM(I))
+      RETURN
+  600 CONTINUE
+      RETURN
+      END
+
+      SUBROUTINE INTEG(X,F,FINT,N,START)
+      DIMENSION X(1),F(1)
+      DIMENSION A(1000),B(1000),C(1000)
+      CALL PARCOE(F,X,A,B,C,N)
+      FINT=START
+      N1=N-1
+      DO 10 I=1,N1
+   10 FINT=FINT+(A(I)+B(I)/2.*(X(I+1)+X(I))+
+     1C(I)/3.*((X(I+1)+X(I))*X(I+1)+X(I)*X(I)))*(X(I+1)-X(I))
+      RETURN
+      END
+
+      SUBROUTINE PARCOE(F,X,A,B,C,N)
+      DIMENSION F(1),X(1),A(1),B(1),C(1)
+      C(1)=0.
+      B(1)=(F(2)-F(1))/(X(2)-X(1))
+      A(1)=F(1)-X(1)*B(1)
+      N1=N-1
+      C(N)=0.
+      B(N)=(F(N)-F(N1))/(X(N)-X(N1))
+      A(N)=F(N)-X(N)*B(N)
+      IF(N.EQ.2)RETURN
+      DO 1 J=2,N1
+      J1=J-1
+      D=(F(J)-F(J1))/(X(J)-X(J1))
+      C(J)=F(J+1)/((X(J+1)-X(J))*(X(J+1)-X(J1)))-F(J)/((X(J)-X(J1))*
+     1(X(J+1)-X(J)))+F(J1)/((X(J)-X(J1))*(X(J+1)-X(J1)))
+      B(J)=D-(X(J)+X(J1))*C(J)
+    1 A(J)=F(J1)-X(J1)*D+X(J)*X(J1)*C(J)
+      C(2)=0.
+      B(2)=(F(3)-F(2))/(X(3)-X(2))
+      A(2)=F(2)-X(2)*B(2)
+      C(3)=0.
+      B(3)=(F(4)-F(3))/(X(4)-X(3))
+      A(3)=F(3)-X(3)*B(3)
+      DO 2 J=2,N1
+      IF(C(J).EQ.0.)GO TO 2
+      J1=J+1
+      WT=ABS(C(J1))/(ABS(C(J1))+ABS(C(J)))
+      A(J)=A(J1)+WT*(A(J)-A(J1))
+      B(J)=B(J1)+WT*(B(J)-B(J1))
+      C(J)=C(J1)+WT*(C(J)-C(J1))
+    2 CONTINUE
+      A(N1)=A(N)
+      B(N1)=B(N)
+      C(N1)=C(N)
+      RETURN
+      END
+
