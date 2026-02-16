@@ -17,6 +17,8 @@ Where:
 
 from __future__ import annotations
 
+import math
+import os
 from typing import TYPE_CHECKING, Optional, Tuple, Dict
 import logging
 import numpy as np
@@ -57,52 +59,16 @@ K_BOLTZ = 1.380649e-16  # erg / K
 
 # CGF conversion constants from rgfall.for line 267
 CGF_CONSTANT = 0.026538 / 1.77245  # Factor for converting GF to CONGF
+# Fortran synthe.for PARAMETER: MAXPROF=1000000
+MAX_PROFILE_STEPS = 1_000_000
 
 
-@jit(nopython=True)
-def _voigt_profile_jit(
-    v: float, a: float, h0tab: np.ndarray, h1tab: np.ndarray, h2tab: np.ndarray
-) -> float:
-    """JIT-compiled Voigt profile function."""
-    # CRITICAL FIX: Voigt function is symmetric in v, use abs(v) for table lookup
-    # Bug was: negative v -> negative index -> clamped to 0 -> returned center value!
-    iv = int(abs(v) * 200.0 + 0.5)
-    iv = max(0, min(iv, h0tab.size - 1))
-
-    if a < 0.2:
-        if abs(v) > 10.0:
-            return 0.5642 * a / (v * v)
-        else:
-            return (h2tab[iv] * a + h1tab[iv]) * a + h0tab[iv]
-    elif a > 1.4 or (a + abs(v)) > 3.2:
-        aa = a * a
-        vv = v * v
-        u = (aa + vv) * 1.4142
-        voigt_val = a * 0.79788 / u
-        if a <= 100.0:
-            aau = aa / u
-            vvu = vv / u
-            uu = u * u
-            voigt_val = (
-                (((aau - 10.0 * vvu) * aau * 3.0 + 15.0 * vvu * vvu) + 3.0 * vv - aa)
-                / uu
-                + 1.0
-            ) * voigt_val
-        return voigt_val
-    else:
-        vv = v * v
-        h0 = h0tab[iv]
-        h1 = h1tab[iv] + h0 * 1.12838
-        h2 = h2tab[iv] + h1 * 1.12838 - h0
-        h3 = (1.0 - h2tab[iv]) * 0.37613 - h1 * 0.66667 * vv + h2 * 1.12838
-        h4 = (3.0 * h3 - h1) * 0.37613 + h0 * 0.66667 * vv * vv
-        poly_a = (((h4 * a + h3) * a + h2) * a + h1) * a + h0
-        poly_b = ((-0.122727278 * a + 0.532770573) * a - 0.96284325) * a + 0.979895032
-        return poly_a * poly_b
+# Shared Voigt profile — single canonical JIT-compiled implementation
+from synthe_py.physics.voigt_jit import voigt_profile_jit as _voigt_profile_jit
 
 
 @jit(
-    nopython=True, parallel=False, cache=False
+    nopython=True, parallel=False, cache=True
 )  # CRITICAL: parallel=False to avoid race conditions
 def _compute_asynth_wings_kernel(
     asynth: np.ndarray,
@@ -111,10 +77,15 @@ def _compute_asynth_wings_kernel(
     valid_mask: np.ndarray,
     line_wavelengths: np.ndarray,
     line_indices: np.ndarray,
+    line_types: np.ndarray,
     stim_factors: np.ndarray,
     kappa0_values: np.ndarray,
     adamp_values: np.ndarray,
     doppler_widths: np.ndarray,
+    gamma_rad_values: np.ndarray,
+    gamma_stark_values: np.ndarray,
+    gamma_vdw_values: np.ndarray,
+    kapmin_ref_values: np.ndarray,
     continuum_absorption: np.ndarray,
     wcon_values: np.ndarray,
     wtail_values: np.ndarray,
@@ -153,14 +124,24 @@ def _compute_asynth_wings_kernel(
     for line_idx in range(n_lines):  # Sequential loop to avoid race conditions
         line_wavelength = line_wavelengths[line_idx]
         center_idx = line_indices[line_idx]
+        line_type = line_types[line_idx]
 
-        # CRITICAL FIX: Match Fortran synthe.for line 301 EXACTLY
-        # IF(NBUFF.LT.1.OR.NBUFF.GT.LENGTH)GO TO 320
-        # Fortran SKIPS lines whose centers are outside the grid - NO wing computation!
-        # Previous Python code had "DELLIM handling" for margin lines which adds extra
-        # opacity at grid boundaries, causing ~60x deeper absorption at grid start.
-        if center_idx < 0 or center_idx >= n_wavelengths:
-            continue  # Skip lines outside grid entirely (matching Fortran)
+        # CRITICAL FIX: Skip fort.19 special lines (line_type != 0).
+        # Hydrogen (type -1/-2) → _compute_hydrogen_line_opacity (HPROF4 profile)
+        # Autoionizing (type 1) → _add_fort19_asynth (Lorentz profile)
+        # Helium (type -3/-6) → helium wings path
+        # Processing them here with Voigt/table profiles DOUBLE-COUNTS them
+        # with the wrong profile shape.
+        if line_type != 0:
+            continue
+
+        # Allow wing contributions from lines whose centers fall just outside the grid.
+        # This is required to match full-range Fortran runs when we synthesize a subrange.
+        if (
+            center_idx < -max_profile_steps
+            or center_idx > n_wavelengths - 1 + max_profile_steps
+        ):
+            continue
 
         for depth_idx in range(n_depths):
             if not valid_mask[line_idx, depth_idx]:
@@ -175,7 +156,144 @@ def _compute_asynth_wings_kernel(
             doppler_width = doppler_widths[line_idx, depth_idx]
             stim_factor = stim_factors[line_idx, depth_idx]
 
+            if line_type == 1:
+                # Autoionizing line (Fortran synthe.for label 700)
+                gamma_rad = gamma_rad_values[line_idx]
+                ashore = gamma_stark_values[line_idx]
+                bshore = gamma_vdw_values[line_idx]
+                if gamma_rad <= 0.0 or bshore <= 0.0:
+                    continue
+
+                # Use per-position cutoff (Fortran checks after add)
+                maxstep = max_profile_steps
+                offset = 1
+                red_active = True
+                blue_active = True
+                freq_line = C_LIGHT_NM / line_wavelength
+
+                while offset <= maxstep and (red_active or blue_active):
+                    # Red wing
+                    if red_active:
+                        idx = center_idx + offset
+                        if idx < 0:
+                            # Center below grid; wait for offset to bring idx in-range.
+                            pass
+                        elif idx >= n_wavelengths:
+                            red_active = False
+                        else:
+                            freq = C_LIGHT_NM / wavelength_grid[idx]
+                            epsil = 2.0 * (freq - freq_line) / gamma_rad
+                            profile_val = (
+                                kappa0
+                                * (ashore * epsil + bshore)
+                                / (epsil * epsil + 1.0)
+                                / bshore
+                            )
+                            value_red = profile_val * stim_factor
+                            asynth[depth_idx, idx] += value_red
+                            if use_cutoff:
+                                kapmin_at_idx = continuum_absorption[0, idx] * cutoff
+                                if value_red < kapmin_at_idx:
+                                    red_active = False
+
+                    # Blue wing
+                    if blue_active:
+                        idx = center_idx - offset
+                        if idx < 0:
+                            blue_active = False
+                        elif idx >= n_wavelengths:
+                            # Center is above grid; wait for offset to bring idx in-range.
+                            pass
+                        else:
+                            freq = C_LIGHT_NM / wavelength_grid[idx]
+                            epsil = 2.0 * (freq - freq_line) / gamma_rad
+                            profile_val = (
+                                kappa0
+                                * (ashore * epsil + bshore)
+                                / (epsil * epsil + 1.0)
+                                / bshore
+                            )
+                            value_blue = profile_val * stim_factor
+                            asynth[depth_idx, idx] += value_blue
+                            if use_cutoff:
+                                kapmin_at_idx = continuum_absorption[0, idx] * cutoff
+                                if value_blue < kapmin_at_idx:
+                                    blue_active = False
+
+                    offset += 1
+
+                continue
+
             if doppler_width <= 0.0:
+                continue
+
+            # AUTOIONIZING LINES (TYPE=1): Lorentzian wings with ASHORE/BSHORE
+            # Fortran synthe.for label 700:
+            #   KAPPA = KAPPA0*(ASHORE*EPSIL+BSHORE)/(EPSIL**2+1)/BSHORE
+            #   EPSIL = 2*(FREQ-FRELIN)/GAMMAR
+            if line_type == 1:
+                gamma_rad = gamma_rad_values[line_idx]
+                bshore = gamma_vdw_values[line_idx]
+                ashore = gamma_stark_values[line_idx]
+                if gamma_rad <= 0.0 or bshore <= 0.0:
+                    continue
+
+                maxstep = center_idx
+                if n_wavelengths - center_idx - 1 > maxstep:
+                    maxstep = n_wavelengths - center_idx - 1
+
+                offset = 1
+                red_active = True
+                blue_active = True
+                while offset <= maxstep and (red_active or blue_active):
+                    # Red wing: add then cutoff check
+                    if red_active:
+                        idx = center_idx + offset
+                        if idx < 0:
+                            # Center below grid; wait for offset to bring idx in-range.
+                            pass
+                        elif idx >= n_wavelengths:
+                            red_active = False
+                        else:
+                            freq = C_LIGHT_NM / wavelength_grid[idx]
+                            frelin = C_LIGHT_NM / line_wavelength
+                            epsil = 2.0 * (freq - frelin) / gamma_rad
+                            profile_val = (
+                                kappa0
+                                * (ashore * epsil + bshore)
+                                / (epsil * epsil + 1.0)
+                                / bshore
+                            )
+                            profile_val *= stim_factor
+                            asynth[depth_idx, idx] += profile_val
+                            if use_cutoff:
+                                kapmin_at_idx = continuum_absorption[0, idx] * cutoff
+                                if profile_val < kapmin_at_idx:
+                                    red_active = False
+
+                    # Blue wing: add then cutoff check
+                    if blue_active:
+                        idx = center_idx - offset
+                        if idx < 0:
+                            blue_active = False
+                        else:
+                            freq = C_LIGHT_NM / wavelength_grid[idx]
+                            frelin = C_LIGHT_NM / line_wavelength
+                            epsil = 2.0 * (freq - frelin) / gamma_rad
+                            profile_val = (
+                                kappa0
+                                * (ashore * epsil + bshore)
+                                / (epsil * epsil + 1.0)
+                                / bshore
+                            )
+                            profile_val *= stim_factor
+                            asynth[depth_idx, idx] += profile_val
+                            if use_cutoff:
+                                kapmin_at_idx = continuum_absorption[0, idx] * cutoff
+                                if profile_val < kapmin_at_idx:
+                                    blue_active = False
+
+                    offset += 1
                 continue
 
             # CRITICAL FIX: Compute N10DOP to match Fortran behavior exactly
@@ -184,10 +302,11 @@ def _compute_asynth_wings_kernel(
             dopple = doppler_width / line_wavelength if line_wavelength > 0.0 else 1e-10
             n10dop = int(10.0 * dopple * resolu)
 
-            # If N10DOP = 0, Fortran skips ALL wing contributions for this line
-            # This is the critical fix - without it, Python computes huge spurious wings
+            # Keep at least one wing step when N10DOP rounds to zero.
+            # This preserves weak far-wing contributions from very narrow lines that
+            # still affect nearby grid points in Fortran parity runs.
             if n10dop == 0:
-                continue
+                n10dop = 1
 
             # Get WCON/WTAIL for this line/depth (if available)
             wcon = -1.0  # Use -1.0 as sentinel for "not set"
@@ -214,10 +333,8 @@ def _compute_asynth_wings_kernel(
             # The IBUFF changes with each wing iteration, so cutoff threshold varies!
             # Previous code incorrectly used kapmin_center (continuum at line center) everywhere.
 
-            # For MAXSTEP estimation, we still use a reference kapmin (at line center)
-            kapmin_ref = 0.0
-            if use_cutoff:
-                kapmin_ref = continuum_absorption[depth_idx, center_idx] * cutoff
+            # For MAXSTEP estimation, use depth-specific KAPMIN at line center.
+            kapmin_ref = kapmin_ref_values[line_idx, depth_idx] if use_cutoff else 0.0
 
             # CRITICAL FIX (Dec 2025): Match Fortran XLINOP behavior EXACTLY
             #
@@ -238,10 +355,31 @@ def _compute_asynth_wings_kernel(
 
             # Phase 1: Near-wing profile with KAPMIN check at line center
             nstep_cutoff = n10dop  # Max near-wing step before cutoff
+            profile_at_n10dop = 0.0
+            # Fortran XLINOP uses H0TAB/H1TAB for ADAMP < 0.2
+            vsteps = 200.0
+            tabstep = vsteps * dvoigt
+            tabi = 0.5  # 0-based indexing (Fortran uses 1.5 for 1-based arrays)
             for nstep in range(1, n10dop + 1):
-                x_step = float(nstep) * dvoigt
-                voigt_val = _voigt_profile_jit(x_step, adamp, h0tab, h1tab, h2tab)
-                profile_val = kappa0 * voigt_val  # No stim_factor here
+                if adamp < 0.2:
+                    # Match Fortran's incremental TABI update to preserve rounding behavior.
+                    tabi += tabstep
+                    idx = int(tabi)
+                    if idx < 0:
+                        idx = 0
+                    x_step = float(nstep) * dvoigt
+                    if x_step > 10.0:
+                        profile_val = kappa0 * (0.5642 * adamp / (x_step * x_step))
+                    else:
+                        if idx >= h0tab.size:
+                            idx = h0tab.size - 1
+                        profile_val = kappa0 * (h0tab[idx] + adamp * h1tab[idx])
+                else:
+                    x_step = float(nstep) * dvoigt
+                    voigt_val = _voigt_profile_jit(x_step, adamp, h0tab, h1tab, h2tab)
+                    profile_val = kappa0 * voigt_val  # No stim_factor here
+                if nstep == n10dop:
+                    profile_at_n10dop = profile_val
                 # Check against KAPMIN at LINE CENTER (kapmin_ref)
                 if use_cutoff and profile_val < kapmin_ref:
                     nstep_cutoff = nstep
@@ -269,21 +407,52 @@ def _compute_asynth_wings_kernel(
             #   else:
             #       maxstep = nstep_cutoff  # <-- This was too restrictive!
             #
-            # New code (CORRECT - matches Fortran XLINOP):
-            maxstep = max_profile_steps  # Always use full range, let per-step cutoff terminate
+            # If near-wing cutoff triggers, Fortran skips far wings entirely.
+            if nstep_cutoff != -1:
+                maxstep = nstep_cutoff
+                use_far_wing = False
+                x_far = 0.0
+            else:
+                # Fortran far-wing: X = PROFILE(N10DOP) * N10DOP**2
+                # MAXSTEP = SQRT(X / KAPMIN) + 1, capped by MAXPROF
+                use_far_wing = True
+                if n10dop > 0 and profile_at_n10dop > 0.0 and kapmin_ref > 0.0:
+                    x_far = profile_at_n10dop * float(n10dop) ** 2
+                    maxstep = int(np.sqrt(x_far / kapmin_ref) + 1.0)
+                else:
+                    x_far = 0.0
+                    maxstep = 0
+                if maxstep > max_profile_steps:
+                    maxstep = max_profile_steps
 
             # Phase 3: Apply profile to both red and blue wings
+            tabi_offset = 0.5  # 0-based indexing (Fortran uses 1.5 for 1-based arrays)
             while offset <= maxstep and (red_active or blue_active):
-                # Compute profile value for this offset
-                # CRITICAL FIX (Dec 2025): Use FULL VOIGT at ALL wing steps!
-                # Fortran XLINOP (synthe.for lines 761-762, 780-781) uses:
-                #   VVOIGT=ABS(WAVE-WL)/DOPWL
-                #   KAPPA=KAPPA0*VOIGT(VVOIGT,ADAMP)
-                # The 1/x^2 approximation (fort.12 path) underestimates far-wing opacity
-                # compared to full Voigt, causing narrower wings at surface layers.
-                x_offset = float(offset) * dvoigt
-                voigt_val = _voigt_profile_jit(x_offset, adamp, h0tab, h1tab, h2tab)
-                profile_val = kappa0 * voigt_val * stim_factor
+                # Compute profile value for this offset (Fortran near-wing vs far-wing)
+                if use_far_wing and offset > n10dop:
+                    profile_val = x_far / float(offset) ** 2
+                else:
+                    if adamp < 0.2:
+                        tabi_offset += tabstep
+                        idx = int(tabi_offset)
+                        if idx < 0:
+                            idx = 0
+                        x_offset = float(offset) * dvoigt
+                        if x_offset > 10.0:
+                            profile_val = kappa0 * (
+                                0.5642 * adamp / (x_offset * x_offset)
+                            )
+                        else:
+                            if idx >= h0tab.size:
+                                idx = h0tab.size - 1
+                            profile_val = kappa0 * (h0tab[idx] + adamp * h1tab[idx])
+                    else:
+                        x_offset = float(offset) * dvoigt
+                        voigt_val = _voigt_profile_jit(
+                            x_offset, adamp, h0tab, h1tab, h2tab
+                        )
+                        profile_val = kappa0 * voigt_val
+                profile_val = profile_val * stim_factor
 
                 # Process red wing
                 # Fortran XLINOP (lines 767-768): Check BEFORE adding, exit if below cutoff
@@ -296,7 +465,6 @@ def _compute_asynth_wings_kernel(
                     else:
                         wave = wavelength_grid[idx]
                         skip_red = wcon > 0.0 and wave < wcon
-
                         if not skip_red:
                             value_red = profile_val
 
@@ -305,20 +473,9 @@ def _compute_asynth_wings_kernel(
                                 taper = (wave - wcon) / max(wtail - wcon, 1e-10)
                                 value_red = value_red * taper
 
-                            # XLINOP per-step cutoff (line 767):
-                            # IF(KAPPA.LT.CONTINUUM(IBUFF)*CUTOFF)GO TO 212
-                            # Check BEFORE adding - exit red wing if below threshold
-                            if use_cutoff:
-                                kapmin_at_idx = (
-                                    continuum_absorption[depth_idx, idx] * cutoff
-                                )
-                                if value_red < kapmin_at_idx:
-                                    red_active = False
-                                    # Skip this step but continue processing blue wing
-                                else:
-                                    asynth[depth_idx, idx] += value_red
-                            else:
-                                asynth[depth_idx, idx] += value_red
+                            # Fortran uses KAPMIN at line center to set MAXSTEP,
+                            # no per-position cutoff in the wing loop.
+                            asynth[depth_idx, idx] += value_red
 
                 # Process blue wing
                 # Fortran XLINOP (lines 784-785): Add FIRST, then check for exit
@@ -326,10 +483,12 @@ def _compute_asynth_wings_kernel(
                     idx = center_idx - offset
                     if idx < 0:
                         blue_active = False
+                    elif idx >= n_wavelengths:
+                        # Center is above grid; wait for offset to bring idx in-range.
+                        pass
                     else:
                         wave = wavelength_grid[idx]
                         skip_blue = wcon > 0.0 and wave < wcon
-
                         if not skip_blue:
                             value_blue = profile_val
 
@@ -341,13 +500,8 @@ def _compute_asynth_wings_kernel(
                             # XLINOP behavior (line 784-785): Add FIRST, then check
                             asynth[depth_idx, idx] += value_blue
 
-                            # Check AFTER adding - exit blue wing if below threshold
-                            if use_cutoff:
-                                kapmin_at_idx = (
-                                    continuum_absorption[depth_idx, idx] * cutoff
-                                )
-                                if value_blue < kapmin_at_idx:
-                                    blue_active = False
+                            # Fortran uses KAPMIN at line center to set MAXSTEP,
+                            # no per-position cutoff in the wing loop.
 
                 offset += 1
 
@@ -359,6 +513,9 @@ def compute_transp(
     cutoff: float = 1e-3,
     continuum_absorption: Optional[np.ndarray] = None,
     wavelength_grid: Optional[np.ndarray] = None,
+    continuum_absorption_full: Optional[np.ndarray] = None,
+    wavelength_grid_full: Optional[np.ndarray] = None,
+    microturb_kms: float = 0.0,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
     Compute TRANSP (line opacity at line center) for all lines and depths.
@@ -421,7 +578,17 @@ def compute_transp(
 
     from ..engine.opacity import _nearest_grid_indices
 
-    center_indices = _nearest_grid_indices(wavelength_grid, catalog.wavelength)
+    index_wavelength = (
+        catalog.index_wavelength
+        if hasattr(catalog, "index_wavelength")
+        else catalog.wavelength
+    )
+    center_indices = _nearest_grid_indices(wavelength_grid, index_wavelength)
+    center_indices_full = None
+    if continuum_absorption_full is not None and wavelength_grid_full is not None:
+        center_indices_full = _nearest_grid_indices(
+            wavelength_grid_full, index_wavelength
+        )
     n_wavelengths = len(wavelength_grid)
     logger.info(f"Using dynamic KAPMIN = CONTINUUM * CUTOFF (Fortran-matching)")
 
@@ -453,6 +620,23 @@ def compute_transp(
     DEBUG_WL_MIN = 299.5  # nm
     DEBUG_WL_MAX = 300.5  # nm
 
+    debug_transp_wl = os.getenv("PY_DEBUG_TRANSP_WL")
+    debug_transp_depth = os.getenv("PY_DEBUG_TRANSP_DEPTH")
+    debug_transp_tol = float(os.getenv("PY_DEBUG_TRANSP_TOL", "2e-4"))
+    debug_transp_wl_val = None
+    debug_transp_depth_idx = None
+    if debug_transp_wl and debug_transp_depth:
+        try:
+            debug_transp_wl_val = float(debug_transp_wl)
+            depth_val = int(debug_transp_depth)
+            if depth_val > 0:
+                debug_transp_depth_idx = depth_val - 1
+        except ValueError:
+            debug_transp_wl_val = None
+            debug_transp_depth_idx = None
+
+    include_h_lines = os.getenv("PY_INCLUDE_H_LINES") == "1"
+
     # Process each line
     for line_idx in range(n_lines):
         if line_idx % log_interval == 0:
@@ -463,6 +647,13 @@ def compute_transp(
         record = catalog.records[line_idx]
         element = record.element
         nelion = record.ion_stage
+
+        # Hydrogen lines are handled with HPROF4-style profiles elsewhere unless overridden.
+        if not include_h_lines and (
+            record.line_type == -1
+            or (str(element).strip().upper() in {"H", "H I", "HI"} and nelion == 1)
+        ):
+            continue
 
         # CRITICAL FIX: Use pre-computed QXNFPEL and QDOPPLE from NPZ (matching Fortran fort.10)
         # Fortran synthe.for line 220: READ(10)QXNFPEL,QDOPPLE
@@ -523,6 +714,9 @@ def compute_transp(
                 else:
                     # dop_velocity is shape (n_depths,) - use it directly
                     dop_val = dop_velocity[depth_idx]
+                if microturb_kms > 0.0:
+                    micro = microturb_kms / C_LIGHT_KM
+                    dop_val = math.sqrt(dop_val * dop_val + micro * micro)
 
                 if pop_val > 0.0 and dop_val > 0.0:
                     # CRITICAL FIX: Match Fortran synthe.for line 240 exactly
@@ -581,24 +775,59 @@ def compute_transp(
 
             # CRITICAL FIX: Convert GF to CONGF by dividing by frequency
             # From rgfall.for line 266: FRELIN = 2.99792458D17/WLVAC
-            wavelength_nm = record.wavelength
+            # rgfall.for uses WLVAC (energy-derived, with shifts) for FRELIN/CGF.
+            wavelength_nm = (
+                index_wavelength[line_idx]
+                if index_wavelength is not None
+                else record.wavelength
+            )
             freq_hz = C_LIGHT_NM / wavelength_nm  # Frequency in Hz
             gf_linear = catalog.gf[
                 line_idx
             ]  # Linear gf (already converted from log_gf)
-            cgf = CGF_CONSTANT * gf_linear / freq_hz  # CONGF conversion
+            cgf_meta = None
+            if record.metadata:
+                cgf_meta = record.metadata.get("cgf")
+            if cgf_meta is not None and cgf_meta > 0.0:
+                cgf = float(cgf_meta)
+            else:
+                cgf = CGF_CONSTANT * gf_linear / freq_hz  # CONGF conversion
+
+            # Gamma values are already linear (s^-1) after catalog load.
+            gamma_rad = catalog.gamma_rad[line_idx]
+            gamma_stark = catalog.gamma_stark[line_idx]
+            gamma_vdw = catalog.gamma_vdw[line_idx]
 
             # PRE-BOLTZMANN CUTOFF CHECK (matches Fortran synthe.for lines 262-267)
             # Fortran: KAPMIN = CONTINUUM(MIN(MAX(NBUFF,1),LENGTH)) * CUTOFF
             # Then: IF(KAPPA0.LT.KAPMIN)GO TO 350
-            kappa0_pre_boltz = cgf * xnfdop
+            if record.line_type == 1:
+                # Autoionizing line (Fortran synthe.for label 700)
+                # KAPPA0 = BSHORE * G * XNFPEL(NELION)
+                # XNFPEL in fort.10 is per mass, so convert number density to per mass.
+                if rho <= 0.0:
+                    continue
+                kappa0_pre_boltz = gamma_vdw * gf_linear * (pop_val / rho)
+            else:
+                kappa0_pre_boltz = cgf * xnfdop
 
             # Compute KAPMIN dynamically (matching Fortran exactly)
             # Fortran: KAPMIN = CONTINUUM(MIN(MAX(NBUFF,1),LENGTH)) * CUTOFF
             # No fallback - Fortran always uses this formula
             center_idx = center_indices[line_idx]
             clamped_idx = max(0, min(center_idx, n_wavelengths - 1))
-            kapmin = continuum_absorption[depth_idx, clamped_idx] * cutoff
+            if (
+                center_indices_full is not None
+                and continuum_absorption_full is not None
+            ):
+                full_idx = center_indices_full[line_idx]
+                full_idx = max(0, min(full_idx, continuum_absorption_full.shape[1] - 1))
+                kapmin = continuum_absorption_full[depth_idx, full_idx] * cutoff
+            else:
+                # Fortran uses CONTINUUM(NBUFF) derived from ABLOG (depth-specific in synthe.for),
+                # but when a full-grid continuum isn't available (e.g. full-range runs),
+                # use the local continuum array.
+                kapmin = continuum_absorption[depth_idx, clamped_idx] * cutoff
 
             # DEBUG: Track statistics (only for first depth to avoid spam)
             is_near_300nm = DEBUG_WL_MIN <= record.wavelength <= DEBUG_WL_MAX
@@ -606,6 +835,43 @@ def compute_transp(
                 debug_stats["total_line_depth_pairs"] += 1
                 if is_near_300nm:
                     debug_stats["lines_near_300nm"] += 1
+
+            if (
+                debug_transp_wl_val is not None
+                and debug_transp_depth_idx == depth_idx
+                and abs(record.wavelength - debug_transp_wl_val) <= debug_transp_tol
+            ):
+                idx_wl = (
+                    index_wavelength[line_idx]
+                    if index_wavelength is not None
+                    else record.wavelength
+                )
+                full_idx_dbg = None
+                full_wave_dbg = None
+                full_cont_dbg = None
+                if (
+                    center_indices_full is not None
+                    and continuum_absorption_full is not None
+                    and wavelength_grid_full is not None
+                ):
+                    full_idx_dbg = int(center_indices_full[line_idx])
+                    full_idx_dbg = max(
+                        0, min(full_idx_dbg, continuum_absorption_full.shape[1] - 1)
+                    )
+                    full_wave_dbg = float(wavelength_grid_full[full_idx_dbg])
+                    full_cont_dbg = float(
+                        continuum_absorption_full[depth_idx, full_idx_dbg]
+                    )
+                print(
+                    "PY_DEBUG_TRANSP_PRE: "
+                    f"line_wl={record.wavelength:.6f} depth={depth_idx + 1} "
+                    f"index_wl={idx_wl:.6f} full_idx={full_idx_dbg} "
+                    f"full_wave={full_wave_dbg} full_cont={full_cont_dbg} "
+                    f"pop={pop_val:.6e} rho={rho:.6e} dop={dop_val:.6e} "
+                    f"xnfdop={xnfdop:.6e} cgf={cgf:.6e} "
+                    f"boltz={boltz:.6e} kappa0_pre={kappa0_pre_boltz:.6e} "
+                    f"kapmin={kapmin:.6e}"
+                )
 
             if kappa0_pre_boltz < kapmin:
                 if depth_idx == 0:
@@ -618,6 +884,17 @@ def compute_transp(
             # POST-BOLTZMANN CUTOFF CHECK (Fortran line 272)
             # RE-ENABLED: This matches Fortran behavior and prevents weak line accumulation
             # Note: The Ca I 551nm issue was actually due to molecular opacity, not this cutoff
+            if (
+                debug_transp_wl_val is not None
+                and debug_transp_depth_idx == depth_idx
+                and abs(record.wavelength - debug_transp_wl_val) <= debug_transp_tol
+            ):
+                print(
+                    "PY_DEBUG_TRANSP_POST: "
+                    f"line_wl={record.wavelength:.6f} depth={depth_idx + 1} "
+                    f"kappa0={kappa0:.6e} kapmin={kapmin:.6e}"
+                )
+
             if kappa0 < kapmin:
                 if depth_idx == 0:
                     debug_stats["skipped_post_boltz"] += 1
@@ -696,10 +973,6 @@ def compute_transp(
 
             # Compute damping parameter
             # ADAMP = (GAMMAR + GAMMAS*XNE + GAMMAW*TXNXN) / DOPPLE
-            # Gamma values are already linear (s^-1) after catalog load.
-            gamma_rad = catalog.gamma_rad[line_idx]
-            gamma_stark = catalog.gamma_stark[line_idx]
-            gamma_vdw = catalog.gamma_vdw[line_idx]
 
             xne = state.electron_density
             txnxn = state.txnxn
@@ -723,34 +996,28 @@ def compute_transp(
                     # Total damping rate (s^-1)
                     gamma_total = gamma_rad + gamma_stark * xne + gamma_vdw * txnxn
 
-                    # Doppler width in frequency units (Hz)
-                    # delta_nu_D = (c / wavelength) * dopple
-                    # where c = C_LIGHT_NM (nm/s), wavelength in nm
-                    delta_nu_doppler = (C_LIGHT_NM / record.wavelength) * dopple
-
-                    # Voigt damping parameter (dimensionless)
-                    # a = gamma / (4 * pi * delta_nu_D)
-                    adamp = gamma_total / (4.0 * np.pi * delta_nu_doppler)
+                    # Fortran synthe.for: ADAMP = (GAMMAR + GAMMAS*XNE + GAMMAW*TXNXN) / DOPPLE
+                    # GAMMA* values are already normalized by (4*pi*freq) in rgfall.
+                    adamp = gamma_total / dopple
                 else:
                     adamp = 0.0
             else:
                 adamp = 0.0
 
-            # Compute line center opacity using Voigt profile
-            # From Fortran line 286-290:
-            #   IF(ADAMP.LT..2)THEN
-            #     KAPCEN=KAPPA0*(1.-1.128*ADAMP)
-            #   ELSE
-            #     KAPCEN=KAPPA0*VOIGT(0.,ADAMP)
-            #   ENDIF
+            # Compute line center opacity
+            # For normal lines: Voigt center (Fortran line 286-290)
+            # For autoionizing lines: KAPPA0 directly (Fortran label 700 writes KAPPA0)
             if adamp >= 0 and kappa0 > 0:
-                if adamp < 0.2:
-                    # Small damping approximation (matches Fortran line 287)
-                    kapcen = kappa0 * (1.0 - 1.128 * adamp)
+                if record.line_type == 1:
+                    kapcen = kappa0
                 else:
-                    # Full Voigt profile (matches Fortran line 289)
-                    voigt_center = voigt_profile(0.0, adamp)
-                    kapcen = kappa0 * voigt_center
+                    if adamp < 0.2:
+                        # Small damping approximation (matches Fortran line 287)
+                        kapcen = kappa0 * (1.0 - 1.128 * adamp)
+                    else:
+                        # Full Voigt profile (matches Fortran line 289)
+                        voigt_center = voigt_profile(0.0, adamp)
+                        kapcen = kappa0 * voigt_center
 
                 # Store result
                 transp[line_idx, depth_idx] = kapcen
@@ -808,7 +1075,92 @@ def compute_transp(
         )
     print("=" * 70 + "\n")
 
-    return transp, valid_mask, np.arange(n_lines)
+    # Return pre-computed center indices for wing and center accumulation.
+    # These are computed using Fortran's logarithmic rounding on the wavelength grid.
+    return transp, valid_mask, center_indices
+
+
+def _compute_fortran_profile_steps(
+    offset: int,
+    kappa0: float,
+    adamp: float,
+    dopple: float,
+    resolu: float,
+    kapmin_ref: float,
+    h0tab: np.ndarray,
+    h1tab: np.ndarray,
+    h2tab: np.ndarray,
+    max_profile_steps: int,
+) -> Tuple[Optional[float], int, int, Optional[float], bool]:
+    """Compute per-offset profile using Fortran XLINOP steps (labels 320-323)."""
+    offset_abs = abs(int(offset))
+    if dopple <= 0.0:
+        return None, 0, 0, None, False
+
+    n10dop = int(10.0 * dopple * resolu)
+    if n10dop <= 0:
+        return None, n10dop, 0, None, False
+
+    profile_at_offset = None
+    profile_at_n10dop = None
+    cutoff_hit = False
+
+    dvoigt = 1.0 / (dopple * resolu)
+    if adamp < 0.2:
+        vsteps = 200.0
+        tabstep = vsteps * dvoigt
+        tabi = 0.5  # 0-based indexing (Fortran uses 1.5 for 1-based arrays)
+        for nstep in range(1, n10dop + 1):
+            tabi += tabstep
+            idx_tab = int(tabi)
+            if idx_tab < 0:
+                idx_tab = 0
+            x_step = float(nstep) * dvoigt
+            if x_step > 10.0:
+                profile = kappa0 * (0.5642 * adamp / (x_step * x_step))
+            else:
+                if idx_tab >= h0tab.size:
+                    idx_tab = h0tab.size - 1
+                profile = kappa0 * (h0tab[idx_tab] + adamp * h1tab[idx_tab])
+            if nstep == offset_abs:
+                profile_at_offset = profile
+            if nstep == n10dop:
+                profile_at_n10dop = profile
+            if profile < kapmin_ref:
+                cutoff_hit = True
+                maxstep = nstep
+                if offset_abs > maxstep:
+                    return None, n10dop, maxstep, profile_at_n10dop, cutoff_hit
+                return profile_at_offset, n10dop, maxstep, profile_at_n10dop, cutoff_hit
+    else:
+        for nstep in range(1, n10dop + 1):
+            x_step = float(nstep) * dvoigt
+            profile = kappa0 * _voigt_profile_jit(x_step, adamp, h0tab, h1tab, h2tab)
+            if nstep == offset_abs:
+                profile_at_offset = profile
+            if nstep == n10dop:
+                profile_at_n10dop = profile
+            if profile < kapmin_ref:
+                cutoff_hit = True
+                maxstep = nstep
+                if offset_abs > maxstep:
+                    return None, n10dop, maxstep, profile_at_n10dop, cutoff_hit
+                return profile_at_offset, n10dop, maxstep, profile_at_n10dop, cutoff_hit
+
+    if profile_at_n10dop is None or kapmin_ref <= 0.0:
+        return profile_at_offset, n10dop, 0, profile_at_n10dop, cutoff_hit
+
+    x_far = profile_at_n10dop * float(n10dop) ** 2
+    maxstep = int(np.sqrt(x_far / kapmin_ref) + 1.0)
+    if maxstep > max_profile_steps:
+        maxstep = max_profile_steps
+
+    if offset_abs > n10dop:
+        if offset_abs > maxstep or x_far <= 0.0:
+            return None, n10dop, maxstep, profile_at_n10dop, cutoff_hit
+        profile_at_offset = x_far / float(offset_abs) ** 2
+
+    return profile_at_offset, n10dop, maxstep, profile_at_n10dop, cutoff_hit
 
 
 def compute_asynth_from_transp(
@@ -820,7 +1172,10 @@ def compute_asynth_from_transp(
     populations: Optional["Populations"] = None,
     cutoff: float = 1e-3,
     continuum_absorption: Optional[np.ndarray] = None,
+    continuum_absorption_full: Optional[np.ndarray] = None,
+    wavelength_grid_full: Optional[np.ndarray] = None,
     metal_tables: Optional["tables.MetalWingTables"] = None,
+    grid_origin: Optional[float] = None,
 ) -> np.ndarray:
     """
     Compute ASYNTH from TRANSP using the stimulated emission correction.
@@ -883,22 +1238,56 @@ def compute_asynth_from_transp(
     # Map lines to wavelength grid
     from ..engine.opacity import _nearest_grid_indices
 
-    line_indices = _nearest_grid_indices(wavelength_grid, catalog.wavelength)
+    index_wavelength = (
+        catalog.index_wavelength
+        if hasattr(catalog, "index_wavelength")
+        else catalog.wavelength
+    )
+    line_indices = _nearest_grid_indices(wavelength_grid, index_wavelength)
+
+    # Raw (unclamped) indices for wing contributions so outside-center lines
+    # still map to correct offset distances.
+    def _nearest_grid_indices_raw(
+        grid: np.ndarray, values: np.ndarray, origin_start: Optional[float] = None
+    ) -> np.ndarray:
+        if len(grid) < 2:
+            return np.zeros(len(values), dtype=np.int64)
+        ratio = grid[1] / grid[0]
+        ratiolg = np.log(ratio)
+        start_val = grid[0] if origin_start is None else origin_start
+        ix_floor = int(np.floor(np.log(start_val) / ratiolg))
+        wbegin = np.exp(ix_floor * ratiolg)
+        if wbegin < start_val:
+            ix_floor += 1
+            wbegin = np.exp(ix_floor * ratiolg)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            ix = np.rint(np.log(values / wbegin) / ratiolg).astype(np.int64)
+        return ix
+
+    line_indices_wing = _nearest_grid_indices_raw(
+        wavelength_grid, index_wavelength, origin_start=grid_origin
+    )
+    if grid_origin is not None and wavelength_grid.size > 1:
+        ratio = wavelength_grid[1] / wavelength_grid[0]
+        ratiolg = np.log(ratio)
+        ix_floor = int(np.floor(np.log(grid_origin) / ratiolg))
+        wbegin = np.exp(ix_floor * ratiolg)
+        if wbegin < grid_origin:
+            ix_floor += 1
+            wbegin = np.exp(ix_floor * ratiolg)
+        grid_offset = int(np.rint(np.log(wavelength_grid[0] / wbegin) / ratiolg))
+        line_indices_wing = line_indices_wing - grid_offset
 
     # Vectorized ASYNTH computation
     # Compute frequencies for all lines at once (matches Fortran line 369)
     line_freqs = C_LIGHT_NM / catalog.wavelength  # Shape: (n_lines,)
 
-    # Compute stimulated emission factors for all line-depth pairs
-    # freq * hkt: (n_lines, 1) * (1, n_depths) -> (n_lines, n_depths)
-    freq_hkt = (
-        line_freqs[:, np.newaxis] * hkt[np.newaxis, :]
-    )  # Shape: (n_lines, n_depths)
-    stim_factors = 1.0 - np.exp(-freq_hkt)  # Shape: (n_lines, n_depths)
+    # Fortran applies the stimulated emission factor after TRANSP is transposed
+    # to each wavelength (synthe.for lines 439-443). Use grid frequency, not line centers.
+    stim_grid = 1.0 - np.exp(-freq_grid[np.newaxis, :] * hkt[:, np.newaxis])
 
-    # Apply valid mask if provided
-    if valid_mask is not None:
-        stim_factors = np.where(valid_mask, stim_factors, 0.0)
+    # Kernel still expects stim_factors array; keep it as ones so wing profiles are unscaled here.
+    stim_factors = np.ones((len(catalog.records), n_depths), dtype=np.float64)
 
     # Import needed functions
     from .profiles.voigt import voigt_profile
@@ -914,10 +1303,17 @@ def compute_asynth_from_transp(
         n_wavelengths,
     )
 
-    # Add center contributions first (TRANSP * stim_factors)
-    # This matches Fortran line 368: ASYNTH(J) = TRANSP(J,I) * (1. - EXP(-FREQ*HKT(J)))
-    asynth_per_line = transp * stim_factors  # Shape: (n_lines, n_depths)
+    # Add center contributions first (TRANSP only; stim applied after wing accumulation).
+    # CRITICAL FIX: Skip fort.19 special lines (line_type != 0) here.
+    # Hydrogen (type -1/-2) → handled by _compute_hydrogen_line_opacity
+    # Autoionizing (type 1) → handled by _add_fort19_asynth
+    # Helium (type -3/-6) → handled by helium wings path
+    # Adding them here would DOUBLE-COUNT their center opacity.
+    asynth_per_line = transp  # Shape: (n_lines, n_depths)
     for line_idx in range(len(catalog.records)):
+        rec = catalog.records[line_idx]
+        if int(getattr(rec, "line_type", 0) or 0) != 0:
+            continue  # Skip fort.19 special lines
         center_idx = line_indices[line_idx]
         if center_idx >= 0 and center_idx < n_wavelengths:
             for depth_idx in range(n_depths):
@@ -926,17 +1322,58 @@ def compute_asynth_from_transp(
                         line_idx, depth_idx
                     ]
 
+    debug_wave = os.getenv("PY_DEBUG_ASYNTH_WAVE")
+    debug_depth = os.getenv("PY_DEBUG_ASYNTH_DEPTH")
+    if debug_wave and debug_depth:
+        try:
+            target_wave = float(debug_wave)
+            target_depth = int(debug_depth) - 1
+        except ValueError:
+            target_wave = None
+            target_depth = -1
+        if (
+            target_wave is not None
+            and 0 <= target_depth < n_depths
+            and n_wavelengths > 0
+        ):
+            idx_target = int(np.argmin(np.abs(wavelength_grid - target_wave)))
+            center_mask = line_indices == idx_target
+            center_transp = transp[center_mask, target_depth]
+            sum_center = float(np.sum(center_transp)) if center_transp.size else 0.0
+            min_center = float(np.min(center_transp)) if center_transp.size else 0.0
+            neg_count = int(np.sum(center_transp < 0.0)) if center_transp.size else 0
+            print(
+                f"PY_DEBUG_ASYNTH: wave={float(wavelength_grid[idx_target]):.6f} "
+                f"depth={target_depth + 1} center lines={center_transp.size} "
+                f"sum_transp={sum_center:.6e} min_transp={min_center:.6e} "
+                f"neg_count={neg_count}"
+            )
+            if neg_count > 0:
+                neg_idx = np.where(center_mask)[0][center_transp < 0.0]
+                for line_i in neg_idx[:10]:
+                    rec = catalog.records[int(line_i)]
+                    print(
+                        f"  NEG TRANSP line: wl={float(rec.wavelength):.6f} "
+                        f"loggf={float(rec.log_gf):.3f} "
+                        f"transp={float(transp[line_i, target_depth]):.6e}"
+                    )
+
     # Pre-compute arrays for JIT kernel if Numba is available
     if NUMBA_AVAILABLE:
-        # Pre-compute kappa0, adamp, doppler_widths, wcon, wtail for all lines/depths
+        # Pre-compute kappa0, adamp, doppler_widths, gamma values, wcon, wtail for all lines/depths
         n_lines = len(catalog.records)
 
         # Initialize arrays
         kappa0_array = np.zeros((n_lines, n_depths), dtype=np.float64)
         adamp_array = np.zeros((n_lines, n_depths), dtype=np.float64)
         doppler_widths_array = np.zeros((n_lines, n_depths), dtype=np.float64)
+        gamma_rad_array = np.asarray(catalog.gamma_rad, dtype=np.float64)
+        gamma_stark_array = np.asarray(catalog.gamma_stark, dtype=np.float64)
+        gamma_vdw_array = np.asarray(catalog.gamma_vdw, dtype=np.float64)
+        line_types_array = np.asarray(catalog.line_types, dtype=np.int8)
         wcon_array = np.zeros(n_lines * n_depths, dtype=np.float64)  # Flattened
         wtail_array = np.zeros(n_lines * n_depths, dtype=np.float64)  # Flattened
+        kapmin_ref_array = np.zeros((n_lines, n_depths), dtype=np.float64)
 
         # Cache populations per element
         population_cache: Dict[str, Tuple[np.ndarray, np.ndarray]] = {}
@@ -948,6 +1385,16 @@ def compute_asynth_from_transp(
         h2tab = voigt_tables.h2tab
 
         # Pre-compute all values
+        center_indices_full = None
+        if continuum_absorption_full is not None and wavelength_grid_full is not None:
+            center_indices_full = _nearest_grid_indices(
+                wavelength_grid_full,
+                (
+                    catalog.index_wavelength
+                    if hasattr(catalog, "index_wavelength")
+                    else catalog.wavelength
+                ),
+            )
         for line_idx in range(n_lines):
             record = catalog.records[line_idx]
             line_wavelength = record.wavelength
@@ -1029,32 +1476,55 @@ def compute_asynth_from_transp(
                         temp / 10_000.0
                     ) ** 0.3
 
-                # Compute damping parameter correctly using frequency units
-                # adamp = gamma / (4 * pi * delta_nu_D)
-                # where delta_nu_D = (c / wavelength) * doppler_velocity
+                # Fortran synthe.for: ADAMP = (GAMMAR + GAMMAS*XNE + GAMMAW*TXNXN) / DOPPLE
+                # GAMMA* values are already normalized by (4*pi*freq) in rgfall.
                 dopple = (
                     doppler_width / line_wavelength if line_wavelength > 0 else 1e-6
                 )
                 if dopple > 0 and line_wavelength > 0:
                     gamma_total = gamma_rad + gamma_stark * xne + gamma_vdw * txnxn
-                    delta_nu_doppler = (C_LIGHT_NM / line_wavelength) * dopple
-                    adamp = gamma_total / (4.0 * np.pi * delta_nu_doppler)
+                    adamp = gamma_total / dopple
                 else:
                     adamp = 0.0
 
                 adamp = max(adamp, 1e-12)
                 adamp_array[line_idx, depth_idx] = adamp
 
-                # Recover kappa0 from TRANSP
-                if adamp < 0.2:
-                    voigt_center = 1.0 - 1.128 * adamp
-                else:
-                    voigt_center = voigt_profile(0.0, adamp)
+                # Depth-specific KAPMIN reference at the line center.
+                if use_cutoff:
+                    if (
+                        continuum_absorption_full is not None
+                        and wavelength_grid_full is not None
+                        and center_indices_full is not None
+                    ):
+                        full_idx = int(center_indices_full[line_idx])
+                        full_idx = max(
+                            0, min(full_idx, continuum_absorption_full.shape[1] - 1)
+                        )
+                        kapmin_ref_array[line_idx, depth_idx] = (
+                            continuum_absorption_full[depth_idx, full_idx] * cutoff
+                        )
+                    else:
+                        center_idx = int(line_indices_wing[line_idx])
+                        center_idx = max(0, min(center_idx, n_wavelengths - 1))
+                        kapmin_ref_array[line_idx, depth_idx] = (
+                            continuum_absorption[depth_idx, center_idx] * cutoff
+                        )
 
-                if voigt_center > 0:
-                    kappa0 = transp_val / voigt_center
-                else:
+                # Recover kappa0 from TRANSP
+                if record.line_type == 1:
+                    # Autoionizing line uses KAPPA0 directly (no Voigt center scaling)
                     kappa0 = transp_val
+                else:
+                    if adamp < 0.2:
+                        voigt_center = 1.0 - 1.128 * adamp
+                    else:
+                        voigt_center = voigt_profile(0.0, adamp)
+
+                    if voigt_center > 0:
+                        kappa0 = transp_val / voigt_center
+                    else:
+                        kappa0 = transp_val
 
                 kappa0_array[line_idx, depth_idx] = kappa0
 
@@ -1080,10 +1550,778 @@ def compute_asynth_from_transp(
                         if wtail is not None and wtail > 0.0:
                             wtail_array[idx_wcon] = wtail
 
+        # Optional debug: inspect wing reach for a specific line/wave/depth.
+        debug_line_wl = os.getenv("PY_DEBUG_WING_LINE_WL")
+        debug_line_depth = os.getenv("PY_DEBUG_WING_LINE_DEPTH")
+        debug_target_wave = os.getenv("PY_DEBUG_WING_TARGET_WAVE")
+        if debug_line_wl and debug_line_depth and debug_target_wave:
+            try:
+                line_wl_val = float(debug_line_wl)
+                depth_val = int(debug_line_depth) - 1
+                target_wave_val = float(debug_target_wave)
+            except ValueError:
+                line_wl_val = None
+                depth_val = None
+                target_wave_val = None
+            if (
+                line_wl_val is not None
+                and depth_val is not None
+                and target_wave_val is not None
+                and 0 <= depth_val < n_depths
+            ):
+                line_idx_dbg = int(np.argmin(np.abs(catalog.wavelength - line_wl_val)))
+                target_idx_dbg = int(
+                    np.argmin(np.abs(wavelength_grid - target_wave_val))
+                )
+                doppler_width_dbg = doppler_widths_array[line_idx_dbg, depth_val]
+                dopple_dbg = (
+                    doppler_width_dbg / line_wl_val if line_wl_val > 0.0 else 0.0
+                )
+                adamp_dbg = adamp_array[line_idx_dbg, depth_val]
+                kappa0_dbg = kappa0_array[line_idx_dbg, depth_val]
+                kapmin_dbg = kapmin_ref_array[line_idx_dbg, depth_val]
+                center_idx_dbg = int(line_indices_wing[line_idx_dbg])
+                resolu_dbg = 300000.0
+                if n_wavelengths > 1:
+                    ratio_dbg = wavelength_grid[1] / wavelength_grid[0]
+                    if ratio_dbg > 1.0:
+                        resolu_dbg = 1.0 / (ratio_dbg - 1.0)
+                n10dop_dbg = int(10.0 * dopple_dbg * resolu_dbg)
+                dvoigt_dbg = 1.0 / (dopple_dbg * resolu_dbg) if dopple_dbg > 0 else 1.0
+                profile_n10 = 0.0
+                if n10dop_dbg > 0:
+                    if adamp_dbg < 0.2:
+                        vsteps_dbg = 200.0
+                        tabstep_dbg = vsteps_dbg * dvoigt_dbg
+                        tabi_dbg = 0.5 + tabstep_dbg * float(n10dop_dbg)
+                        idx_dbg = int(tabi_dbg)
+                        idx_dbg = max(0, min(idx_dbg, h0tab.size - 1))
+                        profile_n10 = kappa0_dbg * (
+                            h0tab[idx_dbg] + adamp_dbg * h1tab[idx_dbg]
+                        )
+                    else:
+                        x_step_dbg = float(n10dop_dbg) * dvoigt_dbg
+                        voigt_dbg = voigt_profile(x_step_dbg, adamp_dbg)
+                        profile_n10 = kappa0_dbg * voigt_dbg
+                if n10dop_dbg > 0 and profile_n10 > 0.0 and kapmin_dbg > 0.0:
+                    x_far_dbg = profile_n10 * float(n10dop_dbg) ** 2
+                    maxstep_dbg = int(np.sqrt(x_far_dbg / kapmin_dbg) + 1.0)
+                else:
+                    maxstep_dbg = 0
+                offset_dbg = abs(center_idx_dbg - target_idx_dbg)
+                min_profile_dbg = float(os.getenv("PY_DEBUG_WING_MIN_PROFILE", "1e-6"))
+                profile_at_offset = 0.0
+                if offset_dbg > 0 and dopple_dbg > 0.0:
+                    if adamp_dbg < 0.2:
+                        vsteps_dbg = 200.0
+                        tabstep_dbg = vsteps_dbg * dvoigt_dbg
+                        tabi_dbg = 0.5 + tabstep_dbg * float(offset_dbg)
+                        idx_dbg = int(tabi_dbg)
+                        idx_dbg = max(0, min(idx_dbg, h0tab.size - 1))
+                        profile_at_offset = kappa0_dbg * (
+                            h0tab[idx_dbg] + adamp_dbg * h1tab[idx_dbg]
+                        )
+                    else:
+                        x_offset_dbg = float(offset_dbg) * dvoigt_dbg
+                        profile_at_offset = kappa0_dbg * voigt_profile(
+                            x_offset_dbg, adamp_dbg
+                        )
+                transp_dbg = transp[line_idx_dbg, depth_val]
+                valid_dbg = (
+                    valid_mask[line_idx_dbg, depth_val]
+                    if valid_mask is not None
+                    else True
+                )
+                wcon_dbg = -1.0
+                wtail_dbg = -1.0
+                if wcon_array.size > 0:
+                    idx_wcon_dbg = line_idx_dbg * n_depths + depth_val
+                    if idx_wcon_dbg < wcon_array.size:
+                        wcon_dbg = wcon_array[idx_wcon_dbg]
+                    if idx_wcon_dbg < wtail_array.size:
+                        wtail_dbg = wtail_array[idx_wcon_dbg]
+                print(
+                    "PY_DEBUG_WING_LINE: "
+                    f"line_wl={catalog.wavelength[line_idx_dbg]:.6f} "
+                    f"depth={depth_val + 1} target_wave={target_wave_val:.6f} "
+                    f"center_idx={center_idx_dbg} target_idx={target_idx_dbg} "
+                    f"offset={offset_dbg} n10dop={n10dop_dbg} "
+                    f"kapmin={kapmin_dbg:.6e} profile_n10={profile_n10:.6e} "
+                    f"maxstep={maxstep_dbg} dopple={dopple_dbg:.6e} "
+                    f"adamp={adamp_dbg:.6e} kappa0={kappa0_dbg:.6e} "
+                    f"transp={transp_dbg:.6e} valid={valid_dbg} "
+                    f"wcon={wcon_dbg:.6e} wtail={wtail_dbg:.6e} "
+                    f"profile_offset={profile_at_offset:.6e} "
+                    f"min_profile={min_profile_dbg:.6e}"
+                )
+
         # Call JIT kernel
         line_wavelengths_array = np.asarray(catalog.wavelength, dtype=np.float64)
-        line_indices_array = np.asarray(line_indices, dtype=np.int64)
+        line_indices_array = np.asarray(line_indices_wing, dtype=np.int64)
 
+        debug_wave = os.getenv("PY_DEBUG_ASYNTH_WAVE")
+        debug_depth = os.getenv("PY_DEBUG_ASYNTH_DEPTH")
+        if debug_wave and debug_depth:
+            try:
+                target_wave = float(debug_wave)
+                target_depth = int(debug_depth) - 1
+            except ValueError:
+                target_wave = None
+                target_depth = -1
+            if (
+                target_wave is not None
+                and 0 <= target_depth < n_depths
+                and n_wavelengths > 0
+            ):
+                idx_target = int(np.argmin(np.abs(wavelength_grid - target_wave)))
+                freq_target = C_LIGHT_NM / wavelength_grid[idx_target]
+                auto_mask = line_types_array == 1
+                total_auto = 0.0
+                neg_auto = []
+                for line_idx in np.where(auto_mask)[0]:
+                    if (
+                        valid_mask is not None
+                        and not valid_mask[line_idx, target_depth]
+                    ):
+                        continue
+                    center_idx = line_indices_wing[line_idx]
+                    if (
+                        center_idx < -MAX_PROFILE_STEPS
+                        or center_idx > n_wavelengths - 1 + MAX_PROFILE_STEPS
+                    ):
+                        continue
+                    offset = idx_target - center_idx
+                    if offset == 0 or abs(offset) > MAX_PROFILE_STEPS:
+                        continue
+                    gamma_rad = gamma_rad_array[line_idx]
+                    bshore = gamma_vdw_array[line_idx]
+                    ashore = gamma_stark_array[line_idx]
+                    if gamma_rad <= 0.0 or bshore <= 0.0:
+                        continue
+                    freq_line = C_LIGHT_NM / line_wavelengths_array[line_idx]
+                    epsil = 2.0 * (freq_target - freq_line) / gamma_rad
+                    kappa0 = kappa0_array[line_idx, target_depth]
+                    if kappa0 <= 0.0:
+                        continue
+                    kappa = (
+                        kappa0
+                        * (ashore * epsil + bshore)
+                        / (epsil * epsil + 1.0)
+                        / bshore
+                    )
+                    total_auto += kappa
+                    if kappa < 0.0:
+                        neg_auto.append((line_idx, kappa))
+                print(
+                    f"PY_DEBUG_ASYNTH_AUTO: wave={float(wavelength_grid[idx_target]):.6f} "
+                    f"depth={target_depth + 1} auto_lines={int(np.sum(auto_mask))} "
+                    f"neg_auto={len(neg_auto)} total_auto={total_auto:.6e}"
+                )
+                for line_idx, kappa in neg_auto[:10]:
+                    rec = catalog.records[int(line_idx)]
+                    print(
+                        f"  AUTO NEG: wl={float(rec.wavelength):.6f} "
+                        f"loggf={float(rec.log_gf):.3f} kappa={kappa:.6e}"
+                    )
+
+        max_profile_steps = int(MAX_PROFILE_STEPS)
+        debug_idx = -1
+        debug_depth = -1
+        debug_wave_env = os.getenv("PY_DEBUG_ASYNTH_WAVE")
+        debug_depth_env = os.getenv("PY_DEBUG_ASYNTH_DEPTH")
+        if debug_wave_env and debug_depth_env:
+            try:
+                debug_idx = int(
+                    np.argmin(np.abs(wavelength_grid - float(debug_wave_env)))
+                )
+                debug_depth = int(debug_depth_env) - 1
+            except ValueError:
+                debug_idx = -1
+                debug_depth = -1
+        debug_line_env = os.getenv("PY_DEBUG_ASYNTH_LINE")
+        if debug_line_env and debug_idx >= 0 and 0 <= debug_depth < n_depths:
+            try:
+                debug_line_idx = int(debug_line_env)
+            except ValueError:
+                debug_line_idx = -1
+            if 0 <= debug_line_idx < n_lines:
+                line_wl = line_wavelengths_array[debug_line_idx]
+                center_idx = line_indices_wing[debug_line_idx]
+                offset = debug_idx - center_idx
+                adamp = adamp_array[debug_line_idx, debug_depth]
+                kappa0 = kappa0_array[debug_line_idx, debug_depth]
+                doppler_width = doppler_widths_array[debug_line_idx, debug_depth]
+                dopple = doppler_width / line_wl if line_wl > 0.0 else 0.0
+                wcon_dbg = -1.0
+                wtail_dbg = -1.0
+                if wcon_array.size > 0:
+                    idx_wcon_dbg = debug_line_idx * n_depths + debug_depth
+                    if idx_wcon_dbg < wcon_array.size:
+                        wcon_dbg = wcon_array[idx_wcon_dbg]
+                    if idx_wcon_dbg < wtail_array.size:
+                        wtail_dbg = wtail_array[idx_wcon_dbg]
+                wave_target = float(wavelength_grid[debug_idx])
+                skip_by_wcon = wcon_dbg > 0.0 and wave_target < wcon_dbg
+                taper_factor = 1.0
+                if (
+                    wcon_dbg > 0.0
+                    and wtail_dbg > 0.0
+                    and wave_target < wtail_dbg
+                    and wtail_dbg > wcon_dbg
+                ):
+                    taper_factor = (wave_target - wcon_dbg) / (wtail_dbg - wcon_dbg)
+                resolu_local = 300000.0
+                if n_wavelengths > 1:
+                    ratio = wavelength_grid[1] / wavelength_grid[0]
+                    if ratio > 1.0:
+                        resolu_local = 1.0 / (ratio - 1.0)
+                dvoigt = 1.0 / (dopple * resolu_local) if dopple > 0.0 else 0.0
+                if adamp < 0.2:
+                    vsteps = 200.0
+                    tabstep = vsteps * dvoigt
+                    tabi = 0.5 + tabstep * float(abs(offset))
+                    idx_tab = int(tabi)
+                    if idx_tab < 0:
+                        idx_tab = 0
+                    x_offset = float(abs(offset)) * dvoigt
+                    if x_offset > 10.0:
+                        profile_val = kappa0 * (0.5642 * adamp / (x_offset * x_offset))
+                    else:
+                        if idx_tab >= h0tab.size:
+                            idx_tab = h0tab.size - 1
+                        profile_val = kappa0 * (h0tab[idx_tab] + adamp * h1tab[idx_tab])
+                else:
+                    x_offset = float(offset) * dvoigt
+                    voigt_val = _voigt_profile_jit(x_offset, adamp, h0tab, h1tab, h2tab)
+                    profile_val = kappa0 * voigt_val
+                rec = catalog.records[int(debug_line_idx)]
+                print(
+                    f"PY_DEBUG_ASYNTH_LINE: line={debug_line_idx} wl={line_wl:.6f} "
+                    f"elem={rec.element} ion={int(rec.ion_stage)} "
+                    f"type={int(rec.line_type)} depth={debug_depth + 1} "
+                    f"offset={offset} kappa0={kappa0:.6e} adamp={adamp:.6e} "
+                    f"dopple={dopple:.6e} profile={profile_val:.6e} "
+                    f"wcon={wcon_dbg:.6e} wtail={wtail_dbg:.6e} "
+                    f"wave={wave_target:.6f} skip_wcon={int(skip_by_wcon)} "
+                    f"taper={taper_factor:.6e}"
+                )
+
+        debug_top_env = os.getenv("PY_DEBUG_ASYNTH_TOP")
+        debug_type_env = os.getenv("PY_DEBUG_ASYNTH_TYPE")
+        if (
+            debug_top_env
+            and debug_idx >= 0
+            and 0 <= debug_depth < n_depths
+            and n_wavelengths > 0
+        ):
+            try:
+                debug_top_n = max(1, int(debug_top_env))
+            except ValueError:
+                debug_top_n = 20
+            debug_type = None
+            if debug_type_env:
+                try:
+                    debug_type = int(debug_type_env)
+                except ValueError:
+                    debug_type = None
+
+            wave_target = float(wavelength_grid[debug_idx])
+            stim_target = 1.0 - math.exp(-freq_grid[debug_idx] * hkt[debug_depth])
+            cont_cut = 0.0
+            if continuum_absorption is not None:
+                cont_cut = float(continuum_absorption[debug_depth, debug_idx]) * cutoff
+            resolu_local = 300000.0
+            if n_wavelengths > 1:
+                ratio = wavelength_grid[1] / wavelength_grid[0]
+                if ratio > 1.0:
+                    resolu_local = 1.0 / (ratio - 1.0)
+
+            top_entries = []
+            for line_idx in range(n_lines):
+                if valid_mask is not None and not valid_mask[line_idx, debug_depth]:
+                    continue
+                if debug_type is not None:
+                    if int(line_types_array[line_idx]) != debug_type:
+                        continue
+                kappa0 = kappa0_array[line_idx, debug_depth]
+                if kappa0 <= 0.0:
+                    continue
+                line_wl = line_wavelengths_array[line_idx]
+                doppler_width = doppler_widths_array[line_idx, debug_depth]
+                if line_wl <= 0.0 or doppler_width <= 0.0:
+                    continue
+                dopple = doppler_width / line_wl
+                if dopple <= 0.0:
+                    continue
+                center_idx = int(line_indices_wing[line_idx])
+                offset = debug_idx - center_idx
+                adamp = adamp_array[line_idx, debug_depth]
+
+                dvoigt = 1.0 / (dopple * resolu_local) if dopple > 0.0 else 0.0
+                if adamp < 0.2:
+                    vsteps = 200.0
+                    tabstep = vsteps * dvoigt
+                    tabi = 0.5 + tabstep * float(abs(offset))
+                    idx_tab = int(tabi)
+                    if idx_tab < 0:
+                        idx_tab = 0
+                    x_offset = float(abs(offset)) * dvoigt
+                    if x_offset > 10.0:
+                        profile_val = kappa0 * (0.5642 * adamp / (x_offset * x_offset))
+                    else:
+                        if idx_tab >= h0tab.size:
+                            idx_tab = h0tab.size - 1
+                        profile_val = kappa0 * (h0tab[idx_tab] + adamp * h1tab[idx_tab])
+                else:
+                    x_offset = float(offset) * dvoigt
+                    voigt_val = _voigt_profile_jit(x_offset, adamp, h0tab, h1tab, h2tab)
+                    profile_val = kappa0 * voigt_val
+
+                idx_wcon = line_idx * n_depths + debug_depth
+                if idx_wcon < wcon_array.size:
+                    wcon_val = wcon_array[idx_wcon]
+                    if wcon_val > 0.0 and wave_target < wcon_val:
+                        continue
+                    wtail_val = (
+                        wtail_array[idx_wcon] if idx_wcon < wtail_array.size else 0.0
+                    )
+                    if (
+                        wcon_val > 0.0
+                        and wtail_val > 0.0
+                        and wave_target < wtail_val
+                        and wtail_val > wcon_val
+                    ):
+                        profile_val *= (wave_target - wcon_val) / (wtail_val - wcon_val)
+
+                if cont_cut > 0.0 and profile_val < cont_cut:
+                    continue
+
+                contrib = profile_val * stim_target
+                if contrib > 0.0:
+                    rec = catalog.records[int(line_idx)]
+                    top_entries.append(
+                        (
+                            contrib,
+                            line_idx,
+                            line_wl,
+                            rec.element,
+                            int(rec.ion_stage),
+                            float(rec.log_gf),
+                            int(rec.line_type),
+                            kappa0,
+                            adamp,
+                        )
+                    )
+
+            top_entries.sort(key=lambda item: item[0], reverse=True)
+            total = float(sum(item[0] for item in top_entries))
+            print(
+                f"PY_DEBUG_ASYNTH_TOP: wave={wave_target:.6f} depth={debug_depth + 1} "
+                f"lines={len(top_entries)} total={total:.6e} top_n={debug_top_n}"
+            )
+            for entry in top_entries[:debug_top_n]:
+                (
+                    contrib,
+                    line_idx,
+                    line_wl,
+                    element,
+                    ion_stage,
+                    log_gf,
+                    line_type,
+                    kappa0,
+                    adamp,
+                ) = entry
+                print(
+                    f"  line={line_idx} wl={line_wl:.6f} elem={element} ion={ion_stage} "
+                    f"type={line_type} loggf={log_gf:.3f} kappa0={kappa0:.3e} "
+                    f"adamp={adamp:.3e} contrib={contrib:.6e}"
+                )
+
+        use_wcon_debug = wcon_array.size > 0
+        debug_wing_wave_env = os.getenv("PY_DEBUG_WING_WAVE")
+        if debug_wing_wave_env and n_wavelengths > 0:
+            try:
+                debug_wing_wave = float(debug_wing_wave_env)
+            except ValueError:
+                debug_wing_wave = None
+            if debug_wing_wave is not None:
+                idx_target = int(np.argmin(np.abs(wavelength_grid - debug_wing_wave)))
+                wave_target = float(wavelength_grid[idx_target])
+                depth_env = os.getenv("PY_DEBUG_WING_DEPTHS")
+                if depth_env:
+                    depth_list = []
+                    for item in depth_env.split(","):
+                        item = item.strip()
+                        if not item:
+                            continue
+                        try:
+                            depth_val = int(item)
+                        except ValueError:
+                            continue
+                        if depth_val > 0:
+                            depth_list.append(depth_val - 1)
+                else:
+                    depth_list = [0, 19, 39, 59, 79]
+
+                max_offset_env = os.getenv("PY_DEBUG_WING_OFFSET_MAX")
+                wl_window_env = os.getenv("PY_DEBUG_WING_WL_WINDOW")
+                top_n_env = os.getenv("PY_DEBUG_WING_TOP_N")
+                min_profile_env = os.getenv("PY_DEBUG_WING_MIN_PROFILE")
+                max_offset = int(max_offset_env) if max_offset_env else None
+                wl_window = float(wl_window_env) if wl_window_env else None
+                top_n = int(top_n_env) if top_n_env else 50
+                min_profile = float(min_profile_env) if min_profile_env else 0.0
+                debug_candidates = os.getenv("PY_DEBUG_WING_CANDIDATES") == "1"
+                debug_fortran_profile = os.getenv("PY_DEBUG_WING_FORTRAN") == "1"
+
+                if max_offset is None and wl_window is None:
+                    print(
+                        "PY_DEBUG_WING: set PY_DEBUG_WING_OFFSET_MAX or "
+                        "PY_DEBUG_WING_WL_WINDOW to limit scan; skipping."
+                    )
+                else:
+                    resolu_local = 300000.0
+                    if n_wavelengths > 1:
+                        ratio = wavelength_grid[1] / wavelength_grid[0]
+                        if ratio > 1.0:
+                            resolu_local = 1.0 / (ratio - 1.0)
+
+                    for depth_idx in depth_list:
+                        if not (0 <= depth_idx < n_depths):
+                            continue
+                        hits = []
+                        center_hits = []
+                        for line_idx in range(n_lines):
+                            if (
+                                valid_mask is not None
+                                and not valid_mask[line_idx, depth_idx]
+                            ):
+                                continue
+                            center_idx = int(line_indices_wing[line_idx])
+                            offset = idx_target - center_idx
+                            if max_offset is not None and abs(offset) > max_offset:
+                                continue
+                            line_wl = line_wavelengths_array[line_idx]
+                            if (
+                                wl_window is not None
+                                and abs(line_wl - wave_target) > wl_window
+                            ):
+                                continue
+
+                            line_type = int(line_types_array[line_idx])
+                            kappa0 = kappa0_array[line_idx, depth_idx]
+                            if kappa0 <= 0.0:
+                                continue
+                            adamp = adamp_array[line_idx, depth_idx]
+                            doppler_width = doppler_widths_array[line_idx, depth_idx]
+                            dopple = doppler_width / line_wl if line_wl > 0.0 else 0.0
+
+                            wcon = -1.0
+                            wtail = -1.0
+                            if use_wcon_debug:
+                                idx_wcon = line_idx * n_depths + depth_idx
+                                if idx_wcon < wcon_array.size:
+                                    wcon_val = wcon_array[idx_wcon]
+                                    if wcon_val > 0.0:
+                                        wcon = wcon_val
+                                        if idx_wcon < wtail_array.size:
+                                            wtail_val = wtail_array[idx_wcon]
+                                            if wtail_val > 0.0:
+                                                wtail = wtail_val
+
+                            profile_val = None
+                            n10dop = None
+                            maxstep = None
+                            profile_at_n10dop = None
+                            kapmin_ref = None
+                            fortran_profile_val = None
+                            fortran_n10dop = None
+                            fortran_maxstep = None
+                            fortran_profile_n10dop = None
+                            fortran_cutoff_hit = None
+                            if offset == 0:
+                                center_val = transp[line_idx, depth_idx]
+                                if abs(center_val) < min_profile:
+                                    continue
+                                rec = catalog.records[int(line_idx)]
+                                cont_center = (
+                                    kapmin_ref_array[line_idx, depth_idx] / cutoff
+                                    if use_cutoff and cutoff > 0.0
+                                    else float("nan")
+                                )
+                                center_hits.append(
+                                    (
+                                        abs(center_val),
+                                        center_val,
+                                        line_idx,
+                                        line_wl,
+                                        rec.element,
+                                        int(rec.ion_stage),
+                                        int(rec.line_type),
+                                        kappa0,
+                                        adamp,
+                                        dopple,
+                                        cont_center,
+                                    )
+                                )
+                                continue
+                            if line_type == 1:
+                                gamma_rad = gamma_rad_array[line_idx]
+                                bshore = gamma_vdw_array[line_idx]
+                                ashore = gamma_stark_array[line_idx]
+                                if gamma_rad <= 0.0 or bshore <= 0.0:
+                                    continue
+                                freq = C_LIGHT_NM / wave_target
+                                freq_line = C_LIGHT_NM / line_wl
+                                epsil = 2.0 * (freq - freq_line) / gamma_rad
+                                profile_val = (
+                                    kappa0
+                                    * (ashore * epsil + bshore)
+                                    / (epsil * epsil + 1.0)
+                                    / bshore
+                                )
+                                maxstep = max_profile_steps
+                                profile_at_n10dop = None
+                                kapmin_ref = None
+                            else:
+                                if dopple <= 0.0:
+                                    continue
+                                n10dop = int(10.0 * dopple * resolu_local)
+                                if n10dop == 0:
+                                    n10dop = 1
+                                dvoigt = 1.0 / (dopple * resolu_local)
+                                kapmin_ref = (
+                                    kapmin_ref_array[line_idx, depth_idx]
+                                    if use_cutoff
+                                    else 0.0
+                                )
+                                nstep_cutoff = n10dop
+                                profile_at_n10dop = 0.0
+                                vsteps = 200.0
+                                tabstep = vsteps * dvoigt
+                                for nstep in range(1, n10dop + 1):
+                                    if adamp < 0.2:
+                                        tabi = 0.5 + tabstep * float(nstep)
+                                        idx_tab = int(tabi)
+                                        if idx_tab < 0:
+                                            idx_tab = 0
+                                        elif idx_tab >= h0tab.size:
+                                            idx_tab = h0tab.size - 1
+                                        step_profile = kappa0 * (
+                                            h0tab[idx_tab] + adamp * h1tab[idx_tab]
+                                        )
+                                    else:
+                                        x_step = float(nstep) * dvoigt
+                                        voigt_val = _voigt_profile_jit(
+                                            x_step, adamp, h0tab, h1tab, h2tab
+                                        )
+                                        step_profile = kappa0 * voigt_val
+                                    if nstep == n10dop:
+                                        profile_at_n10dop = step_profile
+                                    if use_cutoff and step_profile < kapmin_ref:
+                                        nstep_cutoff = nstep
+                                        break
+                                else:
+                                    nstep_cutoff = -1
+
+                                if nstep_cutoff != -1:
+                                    maxstep = nstep_cutoff
+                                    use_far_wing = False
+                                    x_far = 0.0
+                                else:
+                                    use_far_wing = True
+                                    if (
+                                        n10dop > 0
+                                        and profile_at_n10dop > 0.0
+                                        and kapmin_ref > 0.0
+                                    ):
+                                        x_far = profile_at_n10dop * float(n10dop) ** 2
+                                        maxstep = int(np.sqrt(x_far / kapmin_ref) + 1.0)
+                                    else:
+                                        x_far = 0.0
+                                        maxstep = 0
+                                    if maxstep > max_profile_steps:
+                                        maxstep = max_profile_steps
+
+                                if debug_fortran_profile:
+                                    (
+                                        fortran_profile_val,
+                                        fortran_n10dop,
+                                        fortran_maxstep,
+                                        fortran_profile_n10dop,
+                                        fortran_cutoff_hit,
+                                    ) = _compute_fortran_profile_steps(
+                                        offset=offset,
+                                        kappa0=kappa0,
+                                        adamp=adamp,
+                                        dopple=dopple,
+                                        resolu=resolu_local,
+                                        kapmin_ref=kapmin_ref,
+                                        h0tab=h0tab,
+                                        h1tab=h1tab,
+                                        h2tab=h2tab,
+                                        max_profile_steps=max_profile_steps,
+                                    )
+
+                                if debug_candidates:
+                                    include = (
+                                        abs(offset) <= maxstep
+                                        if maxstep is not None
+                                        else False
+                                    )
+                                    print(
+                                        "PY_DEBUG_WING_CAND: "
+                                        f"depth={depth_idx + 1} wl={line_wl:.6f} "
+                                        f"offset={offset} kappa0={kappa0:.3e} "
+                                        f"adamp={adamp:.3e} dopple={dopple:.3e} "
+                                        f"n10dop={n10dop} maxstep={maxstep} "
+                                        f"profile_n10dop={profile_at_n10dop:.3e} "
+                                        f"kapmin={kapmin_ref:.3e} include={include}"
+                                    )
+                                if abs(offset) > maxstep:
+                                    continue
+                                if use_far_wing and abs(offset) > n10dop:
+                                    profile_val = x_far / float(abs(offset)) ** 2
+                                else:
+                                    if adamp < 0.2:
+                                        tabi = 0.5 + tabstep * float(abs(offset))
+                                        idx_tab = int(tabi)
+                                        if idx_tab < 0:
+                                            idx_tab = 0
+                                        elif idx_tab >= h0tab.size:
+                                            idx_tab = h0tab.size - 1
+                                        profile_val = kappa0 * (
+                                            h0tab[idx_tab] + adamp * h1tab[idx_tab]
+                                        )
+                                    else:
+                                        x_offset = float(abs(offset)) * dvoigt
+                                        voigt_val = _voigt_profile_jit(
+                                            x_offset, adamp, h0tab, h1tab, h2tab
+                                        )
+                                        profile_val = kappa0 * voigt_val
+
+                            if profile_val is None:
+                                continue
+                            if wcon > 0.0 and wave_target < wcon:
+                                continue
+                            if wtail > 0.0 and wcon > 0.0 and wave_target < wtail:
+                                taper = (wave_target - wcon) / max(wtail - wcon, 1e-10)
+                                profile_val = profile_val * taper
+
+                            if abs(profile_val) < min_profile:
+                                continue
+
+                            rec = catalog.records[int(line_idx)]
+                            cont_center = (
+                                kapmin_ref_array[line_idx, depth_idx] / cutoff
+                                if use_cutoff and cutoff > 0.0
+                                else float("nan")
+                            )
+                            hits.append(
+                                (
+                                    abs(profile_val),
+                                    profile_val,
+                                    line_idx,
+                                    offset,
+                                    line_wl,
+                                    rec.element,
+                                    int(rec.ion_stage),
+                                    int(rec.line_type),
+                                    kappa0,
+                                    adamp,
+                                    dopple,
+                                    cont_center,
+                                    n10dop,
+                                    maxstep,
+                                    profile_at_n10dop,
+                                    kapmin_ref,
+                                    fortran_profile_val,
+                                    fortran_n10dop,
+                                    fortran_maxstep,
+                                    fortran_profile_n10dop,
+                                    fortran_cutoff_hit,
+                                )
+                            )
+
+                        hits.sort(key=lambda x: x[0], reverse=True)
+                        center_hits.sort(key=lambda x: x[0], reverse=True)
+                        print(
+                            "PY_DEBUG_WING: "
+                            f"wave={wave_target:.6f} idx={idx_target} depth={depth_idx + 1} "
+                            f"hits={len(hits)} showing={min(top_n, len(hits))}"
+                        )
+                        if center_hits:
+                            print(
+                                "PY_DEBUG_CENTER: "
+                                f"wave={wave_target:.6f} idx={idx_target} depth={depth_idx + 1} "
+                                f"hits={len(center_hits)} showing={min(top_n, len(center_hits))}"
+                            )
+                            for (
+                                _abs_val,
+                                center_val,
+                                line_idx,
+                                line_wl,
+                                element,
+                                ion_stage,
+                                line_type,
+                                kappa0,
+                                adamp,
+                                dopple,
+                                cont_center,
+                            ) in center_hits[:top_n]:
+                                print(
+                                    "PY_DEBUG_CENTER_HIT: "
+                                    f"depth={depth_idx + 1} line={line_idx} "
+                                    f"center_idx={int(line_indices_wing[line_idx])} "
+                                    f"idx={idx_target} "
+                                    f"kappa={center_val:.6e} adamp={adamp:.6e} "
+                                    f"kappa0={kappa0:.6e} wl={line_wl:.6f} "
+                                    f"elem={element} ion={ion_stage} "
+                                    f"type={line_type} dopple={dopple:.6e} "
+                                    f"cont={cont_center:.6e}"
+                                )
+                        for (
+                            _abs_val,
+                            profile_val,
+                            line_idx,
+                            offset,
+                            line_wl,
+                            element,
+                            ion_stage,
+                            line_type,
+                            kappa0,
+                            adamp,
+                            dopple,
+                            cont_center,
+                            n10dop,
+                            maxstep,
+                            profile_at_n10dop,
+                            kapmin_ref,
+                            fortran_profile_val,
+                            fortran_n10dop,
+                            fortran_maxstep,
+                            fortran_profile_n10dop,
+                            fortran_cutoff_hit,
+                        ) in hits[:top_n]:
+                            print(
+                                "PY_DEBUG_WING_HIT: "
+                                f"depth={depth_idx + 1} line={line_idx} "
+                                f"center_idx={int(line_indices_wing[line_idx])} "
+                                f"idx={idx_target} offset={offset} "
+                                f"profile={profile_val:.6e} adamp={adamp:.6e} "
+                                f"kappa0={kappa0:.6e} wl={line_wl:.6f} "
+                                f"elem={element} ion={ion_stage} "
+                                f"type={line_type} dopple={dopple:.6e} "
+                                f"cont={cont_center:.6e} "
+                                f"n10dop={n10dop} maxstep={maxstep} "
+                                f"profile_n10dop={profile_at_n10dop} "
+                                f"kapmin={kapmin_ref} "
+                                f"ft_profile={fortran_profile_val} "
+                                f"ft_n10dop={fortran_n10dop} "
+                                f"ft_maxstep={fortran_maxstep} "
+                                f"ft_profile_n10dop={fortran_profile_n10dop} "
+                                f"ft_cutoff={fortran_cutoff_hit}"
+                            )
         _compute_asynth_wings_kernel(
             asynth,
             wavelength_grid,
@@ -1095,10 +2333,15 @@ def compute_asynth_from_transp(
             ),
             line_wavelengths_array,
             line_indices_array,
+            line_types_array,
             stim_factors,
             kappa0_array,
             adamp_array,
             doppler_widths_array,
+            gamma_rad_array,
+            gamma_stark_array,
+            gamma_vdw_array,
+            kapmin_ref_array,
             (
                 continuum_absorption
                 if use_cutoff
@@ -1107,7 +2350,7 @@ def compute_asynth_from_transp(
             wcon_array,
             wtail_array,
             cutoff,
-            MAX_PROFILE_STEPS,
+            max_profile_steps,
             h0tab,
             h1tab,
             h2tab,
@@ -1115,6 +2358,10 @@ def compute_asynth_from_transp(
 
         # Center contributions were already added before kernel call
         # Kernel only adds wing contributions
+
+        # Fortran synthe.for line 94: ASYNTH(J)=TRANSP(J,I)*(1.-EXP(-FREQ*HKT(J)))
+        # Apply stimulated emission factor after center+wing accumulation.
+        asynth *= stim_grid
 
     else:
         # Numba is required for performance - no pure Python fallback
@@ -1134,5 +2381,20 @@ def compute_asynth_from_transp(
     print(f"  Values > 1e10: {np.sum(asynth > 1e10):,}")
     print(f"  Values > 1e20: {np.sum(asynth > 1e20):,}")
     print(f"  Values > 1e24: {np.sum(asynth > 1e24):,}")
+
+    debug_wave_env = os.getenv("PY_DEBUG_ASYNTH_WAVE")
+    debug_depth_env = os.getenv("PY_DEBUG_ASYNTH_DEPTH")
+    if debug_wave_env and debug_depth_env:
+        try:
+            debug_wave_val = float(debug_wave_env)
+            debug_depth_val = int(debug_depth_env) - 1
+            if 0 <= debug_depth_val < n_depths:
+                idx_target = int(np.argmin(np.abs(wavelength_grid - debug_wave_val)))
+                print(
+                    f"PY_DEBUG_ASYNTH_TOTAL: wave={float(wavelength_grid[idx_target]):.6f} "
+                    f"depth={debug_depth_val + 1} asynth={float(asynth[debug_depth_val, idx_target]):.6e}"
+                )
+        except ValueError:
+            pass
 
     return asynth

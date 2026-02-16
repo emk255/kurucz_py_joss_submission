@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 from typing import TYPE_CHECKING, Dict, Optional
 
 import numpy as np
@@ -57,9 +58,36 @@ HCKT_CM_COEFF = 1.4388  # hc/k in cm·K (for cm⁻¹ energies, from Fortran)
 # However, there are other bugs in the code that compensate for using the wrong HCKT.
 # Until those are found and fixed, using the eV coefficient produces better results.
 KBOLTZ = 1.380649e-16  # erg/K
-M_H = 1.6735575e-24  # g
+AMU = 1.66054e-24  # g (atomic mass unit, from Fortran xnfpelsyn.for 1.660D-24)
 C_LIGHT_KMS = 299_792.458
 C_LIGHT_CMS = 2.99792458e10
+
+# Atomic masses (amu) for Doppler width calculation
+# From Fortran SYNTHE's ATMASS array. Index is atomic number (1=H, 2=He, ...)
+# This matches xnfpelsyn.for lines 488, 502 which use ATMASS(NELEM)
+ATOMIC_MASSES = {
+    'H': 1.008, 'He': 4.003, 'Li': 6.941, 'Be': 9.012, 'B': 10.81,
+    'C': 12.01, 'N': 14.01, 'O': 16.00, 'F': 19.00, 'Ne': 20.18,
+    'Na': 22.99, 'Mg': 24.31, 'Al': 26.98, 'Si': 28.09, 'P': 30.97,
+    'S': 32.07, 'Cl': 35.45, 'Ar': 39.95, 'K': 39.10, 'Ca': 40.08,
+    'Sc': 44.96, 'Ti': 47.87, 'V': 50.94, 'Cr': 52.00, 'Mn': 54.94,
+    'Fe': 55.85, 'Co': 58.93, 'Ni': 58.69, 'Cu': 63.55, 'Zn': 65.38,
+    'Ga': 69.72, 'Ge': 72.64, 'As': 74.92, 'Se': 78.96, 'Br': 79.90,
+    'Kr': 83.80, 'Rb': 85.47, 'Sr': 87.62, 'Y': 88.91, 'Zr': 91.22,
+    'Nb': 92.91, 'Mo': 95.96, 'Tc': 98.00, 'Ru': 101.07, 'Rh': 102.91,
+    'Pd': 106.42, 'Ag': 107.87, 'Cd': 112.41, 'In': 114.82, 'Sn': 118.71,
+    'Sb': 121.76, 'Te': 127.60, 'I': 126.90, 'Xe': 131.29, 'Cs': 132.91,
+    'Ba': 137.33, 'La': 138.91, 'Ce': 140.12, 'Pr': 140.91, 'Nd': 144.24,
+    'Pm': 145.00, 'Sm': 150.36, 'Eu': 151.96, 'Gd': 157.25, 'Tb': 158.93,
+    'Dy': 162.50, 'Ho': 164.93, 'Er': 167.26, 'Tm': 168.93, 'Yb': 173.05,
+    'Lu': 174.97, 'Hf': 178.49, 'Ta': 180.95, 'W': 183.84, 'Re': 186.21,
+    'Os': 190.23, 'Ir': 192.22, 'Pt': 195.08, 'Au': 196.97, 'Hg': 200.59,
+    'Tl': 204.38, 'Pb': 207.2, 'Bi': 208.98, 'Po': 209.00, 'At': 210.00,
+    'Rn': 222.00, 'Fr': 223.00, 'Ra': 226.00, 'Ac': 227.00, 'Th': 232.04,
+    'Pa': 231.04, 'U': 238.03, 'Np': 237.00, 'Pu': 244.00, 'Am': 243.00,
+    'Cm': 247.00, 'Bk': 247.00, 'Cf': 251.00, 'Es': 252.00, 'Fm': 257.00,
+}
+DEFAULT_ATOMIC_MASS = 56.0  # Default to Fe mass for unknown elements
 
 
 def _hydrogen_state(
@@ -105,12 +133,28 @@ def compute_depth_state(
     line_wavelengths: np.ndarray,
     excitation_energy: np.ndarray,
     microturb_kms: float,
+    elements: Optional[np.ndarray] = None,
 ) -> Populations:
-    """Compute LTE-like populations and Doppler widths per depth."""
+    """Compute LTE-like populations and Doppler widths per depth.
+    
+    CRITICAL FIX (Dec 2025): Use element-specific atomic masses for thermal velocity.
+    Fortran xnfpelsyn.for line 488: DOPPLE = SQRT(2*TK/ATMASS(NELEM)/1.660D-24 + ...)
+    Previous Python code used hydrogen mass for all elements, causing:
+    - Fe lines: Doppler widths 7.5x too large (sqrt(56) factor)
+    - This affects wing profiles and total line opacity
+    """
 
     layers: Dict[int, DepthState] = {}
     line_wavelengths = np.asarray(line_wavelengths, dtype=np.float64)
     excitation_energy = np.asarray(excitation_energy, dtype=np.float64)
+    
+    # Pre-compute atomic masses for each line
+    n_lines = len(line_wavelengths)
+    atomic_masses = np.ones(n_lines, dtype=np.float64) * DEFAULT_ATOMIC_MASS
+    if elements is not None:
+        for i, elem in enumerate(elements):
+            elem_str = str(elem)
+            atomic_masses[i] = ATOMIC_MASSES.get(elem_str, DEFAULT_ATOMIC_MASS)
 
     for idx in range(atmosphere.layers):
         temp = max(float(atmosphere.temperature[idx]), 1.0)
@@ -127,10 +171,27 @@ def compute_depth_state(
 
         boltz = np.array([tables.fast_ex(float(energy) * hckt) for energy in excitation_energy], dtype=np.float64)
 
-        thermal_velocity = np.sqrt(2.0 * KBOLTZ * temp / M_H) / C_LIGHT_CMS
-        vturb_model = float(atmosphere.turbulent_velocity[idx]) if atmosphere.turbulent_velocity.size > idx else 0.0
-        total_turb = np.hypot(microturb_kms, vturb_model) / C_LIGHT_KMS
-        doppler_width = line_wavelengths * np.sqrt(total_turb**2 + thermal_velocity**2)
+        # CRITICAL FIX: Element-specific thermal velocities
+        # Fortran xnfpelsyn.for line 488: SQRT(2*TK/ATMASS(NELEM)/1.660D-24 + TURBV²)
+        # thermal_velocity = sqrt(2*k*T / m) / c = sqrt(2*k*T / (mass_amu * AMU)) / c
+        thermal_velocities = np.sqrt(2.0 * KBOLTZ * temp / (atomic_masses * AMU)) / C_LIGHT_CMS
+        
+        # CRITICAL FIX (Jan 2026): Include synthesis microturbulence in DOPPLE.
+        # Fortran synthe.for line 244:
+        #   QDOPPLE = SQRT(QDOPPLE**2 + (TURBV/299792.458)**2)
+        # where TURBV is the microturbulent velocity from the synthesis input.
+        vturb_model_cms = (
+            float(atmosphere.turbulent_velocity[idx])
+            if atmosphere.turbulent_velocity.size > idx
+            else 0.0
+        )
+        vturb_model_kms = vturb_model_cms / 1e5  # cm/s to km/s
+        vturb_model = vturb_model_kms / C_LIGHT_KMS
+        microturb = microturb_kms / C_LIGHT_KMS if microturb_kms > 0 else 0.0
+        total_turb = math.sqrt(vturb_model * vturb_model + microturb * microturb)
+        
+        # Doppler width per line (element-specific thermal + turbulent)
+        doppler_width = line_wavelengths * np.sqrt(total_turb**2 + thermal_velocities**2)
 
         if atmosphere.txnxn is not None:
             txnxn = float(atmosphere.txnxn[idx])
@@ -147,7 +208,14 @@ def compute_depth_state(
             xnf_he1 = float(atmosphere.xnf_he1[idx]) if atmosphere.xnf_he1 is not None else 0.0
             xnf_h2 = float(atmosphere.xnf_h2[idx]) if atmosphere.xnf_h2 is not None else 0.0
             xnfph = atmosphere.xnfph[idx] if atmosphere.xnfph is not None else np.zeros(2, dtype=np.float64)
-            dopph = float(atmosphere.dopph[idx]) if atmosphere.dopph is not None else float(total_turb * C_LIGHT_KMS)
+            if atmosphere.dopph is not None:
+                dopph = float(atmosphere.dopph[idx])
+            else:
+                # Match Fortran DOPPLE(1): thermal + turbulent in units of v/c.
+                # Use hydrogen atomic mass (same table as line doppler widths).
+                mass_h = ATOMIC_MASSES.get("H", 1.008)
+                thermal_vel_h = math.sqrt(2.0 * KBOLTZ * temp / (mass_h * AMU)) / C_LIGHT_CMS
+                dopph = math.sqrt(thermal_vel_h * thermal_vel_h + total_turb * total_turb)
             hydrogen_state = _hydrogen_state(
                 temperature=temp,
                 electron_density=float(atmosphere.electron_density[idx]),

@@ -113,7 +113,8 @@ def _center_summary(
         delta_nu_doppler = (C_LIGHT_NM / rec.wavelength) * dop_val
         if delta_nu_doppler > 0.0:
             gamma_total = gamma_rad + gamma_stark * xne0 + gamma_vdw * txnxn0
-            adamp = gamma_total / (4.0 * math.pi * delta_nu_doppler)
+            # Fortran: ADAMP = gamma_total / DOPPLE (gamma is pre-normalized by 4πν)
+            adamp = gamma_total / dop_val if dop_val > 0 else 0.0
 
     return {
         "transp_depth0": transp0,

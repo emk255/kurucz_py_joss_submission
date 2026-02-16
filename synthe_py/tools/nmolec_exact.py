@@ -1986,46 +1986,19 @@ def _accumulate_molecules_kernel(
             continue
 
         equilj_val = equilj[jmol]
-        if not np.isfinite(equilj_val) or equilj_val <= 0.0:
-            # Skip non-positive or non-finite equilj
+        if not np.isfinite(equilj_val):
             continue
 
-        # Compute TERM in log-space to preserve precision across 100+ orders of magnitude
-        # log(TERM) = log(EQUILJ) + sum(log(XN[k])) - ion*log(XN[ne])
-        log_term = np.log(equilj_val)
-
-        # Process components to compute log(TERM)
-        term_invalid = False
+        # Fortran multiplies TERM in linear space and allows inf/nan to propagate.
+        term = equilj_val
         for lock in range(locj1, locj2 + 1):
             k_raw = int(kcomps[lock])
             if k_raw >= nequa:
                 k_idx = nequa - 1
+                term = term / xn[k_idx]
             else:
                 k_idx = k_raw
-
-            xn_val = xn[k_idx]
-            if not np.isfinite(xn_val) or xn_val <= 0.0:
-                term_invalid = True
-                break
-
-            if k_raw >= nequa:
-                log_term = log_term - np.log(xn_val)  # Division in log-space
-            else:
-                log_term = log_term + np.log(xn_val)  # Multiplication in log-space
-
-        if term_invalid or not np.isfinite(log_term):
-            continue
-
-        # Convert back from log-space, clamping to avoid overflow
-        if log_term > 709.0:  # np.log(np.finfo(np.float64).max) ≈ 709.78
-            term = np.finfo(np.float64).max
-        elif log_term < -745.0:  # np.log(np.finfo(np.float64).tiny) ≈ -745.13
-            term = 0.0
-        else:
-            term = np.exp(log_term)
-
-        if not np.isfinite(term):
-            continue
+                term = term * xn[k_idx]
 
         # Accumulate into EQ[0] using Kahan summation
         y = term - eq_comp[0]
@@ -3205,6 +3178,15 @@ def nmolec_exact(
         - xnatom_molecular: (n_layers,) molecular XNATOM = XN(1)
         - xnmol: (n_layers, MAXMOL) molecular number densities
     """
+    trace_xne_layer_env = os.environ.get("NM_TRACE_XNE_LAYER", "").strip()
+    trace_xne_layer = None
+    if trace_xne_layer_env.lstrip("+-").isdigit():
+        trace_xne_layer = int(trace_xne_layer_env)
+    if trace_xne_layer is not None and pfsaha_func is None:
+        trace_path = os.path.join(os.getcwd(), "logs/nmolec_xne_iter.log")
+        with open(trace_path, "a") as f:
+            f.write("PY_XNE_ITER: pfsaha_func is None\n")
+
     # DISABLED: Experimental features that cause divergence
     # These are kept for reference but not triggered by environment variables
     # The LOG-SPACE and DECIMAL Newton modes require more work to be stable
@@ -3287,6 +3269,11 @@ def nmolec_exact(
     xne_electron_donors = [1, 2, 6, 11, 12, 13, 14, 19, 20, 26]  # Element Z numbers
     xne_nions = [1, 2, 2, 2, 2, 2, 2, 2, 2, 2]  # Max ionization stages to consider
 
+    trace_xne_layer_env = os.environ.get("NM_TRACE_XNE_LAYER", "").strip()
+    trace_xne_layer = None
+    if trace_xne_layer_env.lstrip("+-").isdigit():
+        trace_xne_layer = int(trace_xne_layer_env)
+
     def _iterate_xne_for_layer(j_layer: int, pfsaha_fn, max_iter: int = 200) -> float:
         """Iterate XNE to self-consistency using PFSAHA mode 4 electron calculation.
 
@@ -3307,8 +3294,11 @@ def nmolec_exact(
             xne_electron_donors
         )  # Track which elements still contribute significantly
 
-        # Debug: track contributions for first layer
-        debug_xne_iter = j_layer == 0
+        # Debug: track contributions for first or requested layer
+        if trace_xne_layer is None:
+            debug_xne_iter = j_layer == 0
+        else:
+            debug_xne_iter = j_layer == trace_xne_layer
 
         for iteration in range(max_iter):
             xne_new = 0.0
@@ -3359,6 +3349,14 @@ def nmolec_exact(
                                 f"  Z={iz:2d}: elec/atom={elec:.6e}, contrib={contrib:.6e}\n"
                             )
                     f.write(f"  XNE_new (before damp)={xne_new:.6e}\n")
+
+            if debug_xne_iter:
+                debug_log_path = os.path.join(os.getcwd(), "logs/nmolec_xne_iter.log")
+                with open(debug_log_path, "a") as f:
+                    f.write(
+                        f"PY_XNE_ITER: layer={j_layer} iter={iteration} "
+                        f"xne_old={xne_j:.6e} xne_new={xne_new:.6e}\n"
+                    )
 
             # Damped update: XNE = (XNENEW + XNE) / 2
             xne_new = (xne_new + xne_j) / 2.0
@@ -3553,6 +3551,8 @@ def nmolec_exact(
 
     # Track computed XNE for layer-to-layer scaling (Fortran uses XNE array, not .atm values)
     xne_computed = np.zeros(n_layers, dtype=np.float64)
+    # Track seed XNE used before Newton iteration (Fortran uses this in PFSAHA mode=12)
+    xne_seed = np.zeros(n_layers, dtype=np.float64)
 
     # Track previous layer index for continuation seeding
     prev_layer_idx = -1
@@ -3582,6 +3582,7 @@ def nmolec_exact(
                 xn[electron_idx] = base_x
             xne_computed[j] = base_x  # Fortran: XNE(1) = X
             electron_density[j] = base_x
+            xne_seed[j] = base_x
             x_prev_seeded = True
             debug_log_path = os.path.join(os.getcwd(), "logs/nmolec_debug_python.log")
             with open(debug_log_path, "a") as f:
@@ -3618,11 +3619,7 @@ def nmolec_exact(
             invalid_reason: Optional[str] = None
 
             # Scale all XN components by ratio (Fortran: DO 33 K=1,NEQUA; XN(K)=XN(K)*RATIO)
-            # EXCEPT for electron equation - that gets XNTOT/20 always
             for k in range(nequa):
-                # Skip electron equation - it gets special handling below
-                if k == electron_idx:
-                    continue
                 xn_val = xnz_prev[k] * seed_ratio
                 if not np.isfinite(xn_val):
                     nonfinite_seed = True
@@ -3632,24 +3629,11 @@ def nmolec_exact(
                     break
                 xn[k] = xn_val
 
-            # CRITICAL FIX: For electron equation, use XNTOT/20 instead of scaled value
-            # Fortran always initializes XN(NEQUA) = X where X = XNTOT/20
-            # This ensures proper electron density for Saha equation convergence
-            # Without this, electron density from hot layers propagates incorrectly to cool layers
-            if electron_idx is not None and not nonfinite_seed:
-                base_x_layer = xntot / 20.0
-                xn[electron_idx] = base_x_layer
-                # Debug: log this for layer 0
-
             # Scale XNE by ratio (but we'll use base_x_layer for electron_density)
             if use_continuation:
                 xne_scaled = xne_computed[prev_layer_idx] * seed_ratio
             else:
                 xne_scaled = xne_computed[j - 1] * seed_ratio
-
-            # Override with XNTOT/20 for electron
-            if electron_idx is not None and not nonfinite_seed:
-                xne_scaled = xntot / 20.0
 
             if not np.isfinite(xne_scaled):
                 nonfinite_seed = True
@@ -3667,6 +3651,7 @@ def nmolec_exact(
                     xn[electron_idx] = base_x
                 xne_computed[j] = base_x
                 electron_density[j] = base_x
+                xne_seed[j] = base_x
                 _log_seed_reset(
                     layer_idx=j,
                     reason=invalid_reason or "invalid_seed",
@@ -3678,6 +3663,7 @@ def nmolec_exact(
             else:
                 xne_computed[j] = xne_scaled
                 electron_density[j] = xne_scaled
+                xne_seed[j] = xne_scaled
 
         xnz_prev[:nequa] = xn[:nequa]
         _log_xn_seed(
@@ -3688,6 +3674,18 @@ def nmolec_exact(
             xntot_val=xntot,
             electron_val=electron_density[j],
         )
+
+        # Fortran NMOLEC does not iterate XNE via PFSAHA; keep off by default.
+        # Enable explicitly with NM_ENABLE_XNE_ITER=1 if needed for experiments.
+        if pfsaha_func is not None and os.environ.get("NM_ENABLE_XNE_ITER", "0") != "0":
+            if trace_xne_layer is not None and j == trace_xne_layer:
+                trace_path = os.path.join(os.getcwd(), "logs/nmolec_xne_iter.log")
+                with open(trace_path, "a") as f:
+                    f.write(f"PY_XNE_ITER_ENTER: layer={j}\n")
+            electron_density[j] = _iterate_xne_for_layer(j, pfsaha_func)
+            xne_computed[j] = electron_density[j]
+            if electron_idx is not None:
+                xn[electron_idx] = electron_density[j]
 
         if (j == 0) and TRACE_MOLECULE_IDS:
             diag_path = Path(os.getcwd()) / "logs/ electron_diag_trace.log"
@@ -3700,12 +3698,7 @@ def nmolec_exact(
                 for idx in range(sample_size):
                     f.write(f"  XN[{idx+1:3d}]={xn[idx]: .17E}\n")
 
-        # NOTE: XNE iteration (atlas7v.for lines 2956-2980) is disabled.
-        # The XNE iteration only runs during ATLAS model convergence, not spectrum synthesis.
-        # For spectrum synthesis, Fortran uses XNE from .atm file but lets the Newton
-        # iteration update XN[NEQUA] which becomes the final XNE.
-        # The continuation method (hot-to-cool processing) should help the Newton
-        # iteration converge to the correct solution.
+        # NOTE: XNE iteration is enabled by default for parity with xnfpelsyn.
 
         # Compute partition function corrections for NLTE
         # From atlas7v.for lines 4556-4592
@@ -3827,7 +3820,21 @@ def nmolec_exact(
                         # We need to ensure PFSAHA uses electron_density[j] which is XNTOT/20
                         # Pass electron_density[j] explicitly if pfsaha_func supports it
                         # For now, ensure electron_density[j] = x before calling PFSAHA
+                        xne_current = electron_density[j]
+                        if id_elem == 11 and j == 59:
+                            prev_pressure = gas_pressure[j - 1] if j > 0 else float("nan")
+                            prev_xne = xne_computed[j - 1] if j > 0 else float("nan")
+                            with open("logs/pfsaha_na_state_python.log", "a") as fh:
+                                fh.write(
+                                    "PY_PFSAHA_NA_STATE: "
+                                    f"J={j+1:03d} XNE_CUR={xne_current:.6e} "
+                                    f"XNE_SEED={xne_seed[j]:.6e} XNE_COMP={xne_computed[j]:.6e} "
+                                    f"P={gas_pressure[j]:.6e} PPREV={prev_pressure:.6e} "
+                                    f"XNE_PREV={prev_xne:.6e}\n"
+                                )
+                        electron_density[j] = xne_seed[j]
                         pfsaha_func(j, id_elem, ncomp, 12, frac, 0)
+                        electron_density[j] = xne_current
 
                         if trace_pfsa:
                             preview_len = min(max(ncomp, 2), 5)
@@ -5936,6 +5943,7 @@ def nmolec_exact(
             # Store the Newton-converged electron density, NOT the initial guess
             # The previous xntot/20 was WRONG and caused XNE to be 4500× too high!
             electron_density[j] = xn[nequa - 1]
+            xne_computed[j] = electron_density[j]
 
         # Compute molecular number densities
         # From atlas7v_1.for lines 3831-3842

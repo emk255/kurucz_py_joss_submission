@@ -11,9 +11,244 @@ import numpy as np
 
 from .helium_tables import HeTables, HeLineTables, load_tables as load_bcs_tables
 from .profiles.voigt import voigt_profile
+from . import tables
+
+try:
+    from numba import jit
+
+    NUMBA_AVAILABLE = True
+except Exception:  # pragma: no cover - numba is optional
+    NUMBA_AVAILABLE = False
+
+    def jit(*args, **kwargs):  # type: ignore[override]
+        def _decorator(fn):
+            return fn
+
+        return _decorator
+
 
 SQRT_PI = np.sqrt(np.pi)
 HE_DATA_PATH = Path(__file__).resolve().parents[1] / "data"
+
+
+# Shared Voigt profile — single canonical JIT-compiled implementation
+from synthe_py.physics.voigt_jit import voigt_profile_jit as _voigt_profile_jit
+
+
+@jit(nopython=True, cache=True)
+def _find_record_jit(wavelengths: np.ndarray, target: float, threshold: float) -> int:
+    best_idx = -1
+    best_delta = threshold
+    for idx in range(wavelengths.size):
+        delta = abs(wavelengths[idx] - target)
+        if delta <= best_delta:
+            best_delta = delta
+            best_idx = idx
+    return best_idx
+
+
+@jit(nopython=True, cache=True)
+def _profile_bcs_jit(
+    delta_nm: float, dlam: np.ndarray, log_prof: np.ndarray, dlam_len: int
+) -> float:
+    delta_angstrom = delta_nm * 10.0
+    if dlam_len <= 0:
+        return 0.0
+    if delta_angstrom <= dlam[0]:
+        return 10.0 ** log_prof[0]
+    if delta_angstrom >= dlam[dlam_len - 1]:
+        return 10.0 ** log_prof[dlam_len - 1]
+    hi = 1
+    for idx in range(1, dlam_len):
+        if dlam[idx] >= delta_angstrom:
+            hi = idx
+            break
+    lo = hi - 1
+    span = dlam[hi] - dlam[lo]
+    if span <= 0.0:
+        return 10.0 ** log_prof[lo]
+    a = (dlam[hi] - delta_angstrom) / span
+    b = (delta_angstrom - dlam[lo]) / span
+    return 10.0 ** (a * log_prof[lo] + b * log_prof[hi])
+
+
+@jit(nopython=True, cache=True)
+def _evaluate_helium_profile_jit(
+    line_type: int,
+    depth_idx: int,
+    delta_nm: float,
+    line_wavelength: float,
+    doppler_width: float,
+    gamma_rad: float,
+    gamma_stark: float,
+    temperature: np.ndarray,
+    electron_density: np.ndarray,
+    xnfph: np.ndarray,
+    xnf_he2: np.ndarray,
+    has_xnfph: bool,
+    has_xnfhe2: bool,
+    bcs_dlam: np.ndarray,
+    bcs_log_profile: np.ndarray,
+    bcs_len: np.ndarray,
+    griem_wavelength: np.ndarray,
+    griem_log_ne: np.ndarray,
+    griem_ttab: np.ndarray,
+    griem_width: np.ndarray,
+    griem_shift: np.ndarray,
+    griem_alpha: np.ndarray,
+    dim_wavelength: np.ndarray,
+    dim_log_ne: np.ndarray,
+    dim_ttab: np.ndarray,
+    dim_width_e: np.ndarray,
+    dim_shift_e: np.ndarray,
+    dim_width_h: np.ndarray,
+    dim_shift_h: np.ndarray,
+    dim_width_he: np.ndarray,
+    dim_shift_he: np.ndarray,
+    h0tab: np.ndarray,
+    h1tab: np.ndarray,
+    h2tab: np.ndarray,
+) -> float:
+    doppler = doppler_width if doppler_width > 1e-40 else 1e-40
+    wave = line_wavelength + delta_nm
+    temp = temperature[depth_idx]
+    if temp < 5000.0:
+        temp = 5000.0
+    if temp > 80000.0:
+        temp = 80000.0
+    e_density = electron_density[depth_idx]
+    if e_density <= 0.0 or doppler <= 0.0:
+        return 0.0
+    xnfhp = 0.0
+    if has_xnfph and xnfph.shape[1] > 1:
+        xnfhp = xnfph[depth_idx, 1]
+    xnfhep = 0.0
+    if has_xnfhe2 and xnf_he2.size > 0:
+        xnfhep = xnf_he2[depth_idx]
+
+    if line_type in (-3, -4):
+        if abs(line_wavelength - 447.15) < 0.4:
+            if e_density > 1.0e13:
+                return (
+                    SQRT_PI
+                    * doppler
+                    * 10.0
+                    * _profile_bcs_jit(
+                        wave - line_wavelength,
+                        bcs_dlam[0],
+                        bcs_log_profile[depth_idx, 0],
+                        int(bcs_len[0]),
+                    )
+                )
+        if abs(line_wavelength - 402.62) < 0.4:
+            if e_density > 1.0e14:
+                return (
+                    SQRT_PI
+                    * doppler
+                    * 10.0
+                    * _profile_bcs_jit(
+                        wave - line_wavelength,
+                        bcs_dlam[1],
+                        bcs_log_profile[depth_idx, 1],
+                        int(bcs_len[1]),
+                    )
+                )
+        if abs(line_wavelength - 438.79) < 0.4:
+            if e_density > 1.0e14:
+                return (
+                    SQRT_PI
+                    * doppler
+                    * 10.0
+                    * _profile_bcs_jit(
+                        wave - line_wavelength,
+                        bcs_dlam[2],
+                        bcs_log_profile[depth_idx, 2],
+                        int(bcs_len[2]),
+                    )
+                )
+        if abs(line_wavelength - 492.19) < 0.4:
+            if e_density > 1.0e13:
+                return (
+                    SQRT_PI
+                    * doppler
+                    * 10.0
+                    * _profile_bcs_jit(
+                        wave - line_wavelength,
+                        bcs_dlam[3],
+                        bcs_log_profile[depth_idx, 3],
+                        int(bcs_len[3]),
+                    )
+                )
+
+    if line_type in (-3, -4, -6):
+        idx = _find_record_jit(dim_wavelength, line_wavelength, 0.2)
+        if idx >= 0:
+            record_ttab = dim_ttab[idx]
+            it = 1
+            for i in range(1, 4):
+                it = i
+                if record_ttab[i] >= temp:
+                    break
+            x = (temp - record_ttab[it - 1]) / (record_ttab[it] - record_ttab[it - 1])
+            scale = 10.0 ** dim_log_ne[idx]
+            xx = e_density / scale
+            xxh = xnfhp / scale
+            xxhe = xnfhep / scale
+            width = xx * (
+                x * dim_width_e[idx, it] + (1.0 - x) * dim_width_e[idx, it - 1]
+            )
+            width_h = xxh * (
+                x * dim_width_h[idx, it] + (1.0 - x) * dim_width_h[idx, it - 1]
+            )
+            width_he = xxhe * (
+                x * dim_width_he[idx, it] + (1.0 - x) * dim_width_he[idx, it - 1]
+            )
+            shift = x * dim_shift_e[idx, it] + (1.0 - x) * dim_shift_e[idx, it - 1]
+            shift_h = x * dim_shift_h[idx, it] + (1.0 - x) * dim_shift_h[idx, it - 1]
+            shift_he = x * dim_shift_he[idx, it] + (1.0 - x) * dim_shift_he[idx, it - 1]
+            wtot_angstrom = width + width_h + width_he
+            dtot_angstrom = width * shift + width_h * shift_h + width_he * shift_he
+            wtot_nm = wtot_angstrom * 0.1 * 0.5
+            dtot_nm = dtot_angstrom * 0.1
+            a = wtot_nm / doppler + gamma_rad / (doppler / line_wavelength)
+            return _voigt_profile_jit(
+                abs(wave - line_wavelength - dtot_nm) / doppler, a, h0tab, h1tab, h2tab
+            )
+
+        idx = _find_record_jit(griem_wavelength, line_wavelength, 0.2)
+        if idx < 0:
+            a = (gamma_rad + gamma_stark * e_density) / (doppler / line_wavelength)
+            return _voigt_profile_jit(
+                abs(wave - line_wavelength) / doppler, a, h0tab, h1tab, h2tab
+            )
+        record_ttab = griem_ttab[idx]
+        it = 1
+        for i in range(1, 4):
+            it = i
+            if record_ttab[i] >= temp:
+                break
+        x = (temp - record_ttab[it - 1]) / (record_ttab[it] - record_ttab[it - 1])
+        xx = e_density / (10.0 ** griem_log_ne[idx])
+        width = xx * (x * griem_width[idx, it] + (1.0 - x) * griem_width[idx, it - 1])
+        shift = x * griem_shift[idx, it] + (1.0 - x) * griem_shift[idx, it - 1]
+        alpha_val = xx**0.25 * (
+            x * griem_alpha[idx, it] + (1.0 - x) * griem_alpha[idx, it - 1]
+        )
+        xx_ratio = xnfhp / e_density if e_density > 0.0 else 0.0
+        vm1 = 8.78 * (xx_ratio + 2.0 * (1.0 - xx_ratio)) / np.sqrt(temp)
+        rhom = 1.0 / (4.19 * e_density) ** (1.0 / 3.0)
+        sigma = 1.885e14 * width * rhom * vm1 / (line_wavelength * 10.0) ** 2
+        if sigma < 1e-40:
+            sigma = 1e-40
+        ion_term = alpha_val ** (8.0 / 9.0) / sigma ** (1.0 / 3.0)
+        wtot = width * (1.0 + 1.36 * ion_term) * 0.1
+        dtot = width * shift * (1.0 + 2.36 * ion_term / max(abs(shift), 1e-12)) * 0.1
+        a = wtot / doppler + gamma_rad / (doppler / line_wavelength)
+        return _voigt_profile_jit(
+            abs(wave - line_wavelength - dtot) / doppler, a, h0tab, h1tab, h2tab
+        )
+
+    return 0.0
 
 
 @dataclass(frozen=True)
@@ -92,7 +327,9 @@ def _find_record(records: list, wavelength: float, threshold: float) -> Optional
     return best_idx
 
 
-def _parabolic_coefficients(x: np.ndarray, f: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+def _parabolic_coefficients(
+    x: np.ndarray, f: np.ndarray
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     n = x.size
     a = np.zeros(n, dtype=np.float64)
     b = np.zeros(n, dtype=np.float64)
@@ -160,9 +397,7 @@ def _parabolic_integral(x: np.ndarray, f: np.ndarray) -> float:
         x1 = x[i + 1]
         dx = x1 - x0
         total += (
-            a[i]
-            + 0.5 * b[i] * (x1 + x0)
-            + c[i] / 3.0 * ((x1 + x0) * x1 + x0 * x0)
+            a[i] + 0.5 * b[i] * (x1 + x0) + c[i] / 3.0 * ((x1 + x0) * x1 + x0 * x0)
         ) * dx
     return total
 
@@ -170,17 +405,48 @@ def _parabolic_integral(x: np.ndarray, f: np.ndarray) -> float:
 class HeliumWingSolver:
     """Evaluate helium wing profiles for fort.19 special line types."""
 
-    def __init__(self, temperature: np.ndarray, electron_density: np.ndarray,
-                 xnfph: Optional[np.ndarray], xnf_he2: Optional[np.ndarray]) -> None:
+    def __init__(
+        self,
+        temperature: np.ndarray,
+        electron_density: np.ndarray,
+        xnfph: Optional[np.ndarray],
+        xnf_he2: Optional[np.ndarray],
+    ) -> None:
         self.temperature = np.asarray(temperature, dtype=np.float64)
-        self.electron_density = np.maximum(np.asarray(electron_density, dtype=np.float64), 1e-40)
+        self.electron_density = np.maximum(
+            np.asarray(electron_density, dtype=np.float64), 1e-40
+        )
         self.xnfph = np.asarray(xnfph, dtype=np.float64) if xnfph is not None else None
-        self.xnf_he2 = np.asarray(xnf_he2, dtype=np.float64) if xnf_he2 is not None else None
+        self.xnf_he2 = (
+            np.asarray(xnf_he2, dtype=np.float64) if xnf_he2 is not None else None
+        )
         self.tables: HeTables = load_bcs_tables()
         aux = _load_aux_tables()
         self.griem_records = _build_griem_records(aux)
         self.dimitri_records = _build_dimitri_records(aux)
         self._bcs_cache: Dict[Tuple[int, int], Tuple[np.ndarray, np.ndarray]] = {}
+        self._numba_prepared = False
+        self._bcs_dlam = None
+        self._bcs_log_profile = None
+        self._bcs_len = None
+        self._griem_wavelength = None
+        self._griem_log_ne = None
+        self._griem_ttab = None
+        self._griem_width = None
+        self._griem_shift = None
+        self._griem_alpha = None
+        self._dimitri_wavelength = None
+        self._dimitri_log_ne = None
+        self._dimitri_ttab = None
+        self._dimitri_width_e = None
+        self._dimitri_shift_e = None
+        self._dimitri_width_h = None
+        self._dimitri_shift_h = None
+        self._dimitri_width_he = None
+        self._dimitri_shift_he = None
+        self._voigt_h0tab = None
+        self._voigt_h1tab = None
+        self._voigt_h2tab = None
 
     @staticmethod
     def _clamp_temp(temp: float, tmin: float, tmax: float) -> float:
@@ -196,7 +462,155 @@ class HeliumWingSolver:
             return 0.0
         return float(self.xnf_he2[depth_idx])
 
-    def _ensure_bcs(self, depth_idx: int, line_id: int) -> Tuple[np.ndarray, np.ndarray]:
+    def _prepare_numba_cache(self) -> None:
+        if not NUMBA_AVAILABLE or self._numba_prepared:
+            return
+        n_depths = self.temperature.shape[0]
+        max_len = max(
+            self.tables.line_4471.dlam.size,
+            self.tables.line_4026.dlam.size,
+            self.tables.line_4387.dlam.size,
+            self.tables.line_4921.dlam.size,
+        )
+        bcs_dlam = np.zeros((4, max_len), dtype=np.float64)
+        bcs_log_profile = np.zeros((n_depths, 4, max_len), dtype=np.float64)
+        bcs_len = np.zeros(4, dtype=np.int64)
+
+        for line_id in range(1, 5):
+            dlam, _ = self._ensure_bcs(0, line_id)
+            n = dlam.size
+            bcs_len[line_id - 1] = n
+            bcs_dlam[line_id - 1, :n] = dlam
+            for depth_idx in range(n_depths):
+                _, log_profile = self._ensure_bcs(depth_idx, line_id)
+                bcs_log_profile[depth_idx, line_id - 1, :n] = log_profile
+
+        self._bcs_dlam = bcs_dlam
+        self._bcs_log_profile = bcs_log_profile
+        self._bcs_len = bcs_len
+
+        self._griem_wavelength = np.array(
+            [record.wavelength for record in self.griem_records], dtype=np.float64
+        )
+        self._griem_log_ne = np.array(
+            [record.log_ne for record in self.griem_records], dtype=np.float64
+        )
+        self._griem_ttab = np.array(
+            [record.ttab for record in self.griem_records], dtype=np.float64
+        )
+        self._griem_width = np.array(
+            [record.width for record in self.griem_records], dtype=np.float64
+        )
+        self._griem_shift = np.array(
+            [record.shift for record in self.griem_records], dtype=np.float64
+        )
+        self._griem_alpha = np.array(
+            [record.alpha for record in self.griem_records], dtype=np.float64
+        )
+
+        self._dimitri_wavelength = np.array(
+            [record.wavelength for record in self.dimitri_records], dtype=np.float64
+        )
+        self._dimitri_log_ne = np.array(
+            [record.log_ne for record in self.dimitri_records], dtype=np.float64
+        )
+        self._dimitri_ttab = np.array(
+            [record.ttab for record in self.dimitri_records], dtype=np.float64
+        )
+        self._dimitri_width_e = np.array(
+            [record.width_e for record in self.dimitri_records], dtype=np.float64
+        )
+        self._dimitri_shift_e = np.array(
+            [record.shift_e for record in self.dimitri_records], dtype=np.float64
+        )
+        self._dimitri_width_h = np.array(
+            [record.width_h for record in self.dimitri_records], dtype=np.float64
+        )
+        self._dimitri_shift_h = np.array(
+            [record.shift_h for record in self.dimitri_records], dtype=np.float64
+        )
+        self._dimitri_width_he = np.array(
+            [record.width_he for record in self.dimitri_records], dtype=np.float64
+        )
+        self._dimitri_shift_he = np.array(
+            [record.shift_he for record in self.dimitri_records], dtype=np.float64
+        )
+
+        voigt_tables = tables.voigt_tables()
+        self._voigt_h0tab = voigt_tables.h0tab
+        self._voigt_h1tab = voigt_tables.h1tab
+        self._voigt_h2tab = voigt_tables.h2tab
+        self._numba_prepared = True
+
+    def evaluate_numba(
+        self,
+        line_type: int,
+        depth_idx: int,
+        delta_nm: float,
+        line_wavelength: float,
+        doppler_width: float,
+        gamma_rad: float,
+        gamma_stark: float,
+    ) -> float:
+        if not NUMBA_AVAILABLE:
+            return self.evaluate(
+                line_type,
+                depth_idx,
+                delta_nm,
+                line_wavelength,
+                doppler_width,
+                gamma_rad,
+                gamma_stark,
+            )
+        self._prepare_numba_cache()
+        return _evaluate_helium_profile_jit(
+            line_type=line_type,
+            depth_idx=depth_idx,
+            delta_nm=delta_nm,
+            line_wavelength=line_wavelength,
+            doppler_width=doppler_width,
+            gamma_rad=gamma_rad,
+            gamma_stark=gamma_stark,
+            temperature=self.temperature,
+            electron_density=self.electron_density,
+            xnfph=(
+                self.xnfph
+                if self.xnfph is not None
+                else np.zeros((0, 0), dtype=np.float64)
+            ),
+            xnf_he2=(
+                self.xnf_he2
+                if self.xnf_he2 is not None
+                else np.zeros((0,), dtype=np.float64)
+            ),
+            has_xnfph=self.xnfph is not None,
+            has_xnfhe2=self.xnf_he2 is not None,
+            bcs_dlam=self._bcs_dlam,
+            bcs_log_profile=self._bcs_log_profile,
+            bcs_len=self._bcs_len,
+            griem_wavelength=self._griem_wavelength,
+            griem_log_ne=self._griem_log_ne,
+            griem_ttab=self._griem_ttab,
+            griem_width=self._griem_width,
+            griem_shift=self._griem_shift,
+            griem_alpha=self._griem_alpha,
+            dim_wavelength=self._dimitri_wavelength,
+            dim_log_ne=self._dimitri_log_ne,
+            dim_ttab=self._dimitri_ttab,
+            dim_width_e=self._dimitri_width_e,
+            dim_shift_e=self._dimitri_shift_e,
+            dim_width_h=self._dimitri_width_h,
+            dim_shift_h=self._dimitri_shift_h,
+            dim_width_he=self._dimitri_width_he,
+            dim_shift_he=self._dimitri_shift_he,
+            h0tab=self._voigt_h0tab,
+            h1tab=self._voigt_h1tab,
+            h2tab=self._voigt_h2tab,
+        )
+
+    def _ensure_bcs(
+        self, depth_idx: int, line_id: int
+    ) -> Tuple[np.ndarray, np.ndarray]:
         key = (depth_idx, line_id)
         cached = self._bcs_cache.get(key)
         if cached is not None:
@@ -247,12 +661,7 @@ class HeliumWingSolver:
             slice10 = values[it + 1, ip]
             slice01 = values[it, ip + 1]
             slice11 = values[it + 1, ip + 1]
-            return (
-                c1w1w * slice00
-                + c1ww * slice10
-                + cw1w * slice01
-                + cww * slice11
-            )
+            return c1w1w * slice00 + c1ww * slice10 + cw1w * slice01 + cww * slice11
 
         if line_id in (1, 4):
             xxh = self._xnfhp(depth_idx) / xne if xne > 0.0 else 0.0
@@ -313,7 +722,7 @@ class HeliumWingSolver:
         xx = e_density / den
         width = xx * (x * ws[it] + (1.0 - x) * ws[it - 1])
         shift = x * ds[it] + (1.0 - x) * ds[it - 1]
-        alf = xx ** 0.25 * (x * alfs[it] + (1.0 - x) * alfs[it - 1])
+        alf = xx**0.25 * (x * alfs[it] + (1.0 - x) * alfs[it - 1])
         xx_ratio = xnfhp / e_density
         vm1 = 8.78 * (xx_ratio + 2.0 * (1.0 - xx_ratio)) / np.sqrt(temp)
         rhom = 1.0 / (4.19 * e_density) ** (1.0 / 3.0)
@@ -355,7 +764,7 @@ class HeliumWingSolver:
         xx = e_density / den
         width = xx * (x * ws[it] + (1.0 - x) * ws[it - 1])
         shift = x * ds[it] + (1.0 - x) * ds[it - 1]
-        alf = xx ** 0.25 * (x * alfs[it] + (1.0 - x) * alfs[it - 1])
+        alf = xx**0.25 * (x * alfs[it] + (1.0 - x) * alfs[it - 1])
         xx_ratio = xnfhp / e_density
         vm1 = 8.78 * (xx_ratio + 2.0 * (1.0 - xx_ratio)) / np.sqrt(temp)
         rhom = 1.0 / (4.19 * e_density) ** (1.0 / 3.0)
@@ -397,7 +806,7 @@ class HeliumWingSolver:
         xx = e_density / den
         width = xx * (x * ws[it] + (1.0 - x) * ws[it - 1])
         shift = x * ds[it] + (1.0 - x) * ds[it - 1]
-        alf = xx ** 0.25 * (x * alfs[it] + (1.0 - x) * alfs[it - 1])
+        alf = xx**0.25 * (x * alfs[it] + (1.0 - x) * alfs[it - 1])
         xx_ratio = xnfhp / e_density
         vm1 = 8.78 * (xx_ratio + 2.0 * (1.0 - xx_ratio)) / np.sqrt(temp)
         rhom = 1.0 / (4.19 * e_density) ** (1.0 / 3.0)
@@ -431,7 +840,7 @@ class HeliumWingSolver:
         xx = e_density / den
         width = xx * (x * ws[it] + (1.0 - x) * ws[it - 1])
         shift = x * ds[it] + (1.0 - x) * ds[it - 1]
-        alf = xx ** 0.25 * (x * alfs[it] + (1.0 - x) * alfs[it - 1])
+        alf = xx**0.25 * (x * alfs[it] + (1.0 - x) * alfs[it - 1])
         xx_ratio = xnfhp / e_density
         vm1 = 8.78 * (xx_ratio + 2.0 * (1.0 - xx_ratio)) / np.sqrt(temp)
         rhom = 1.0 / (4.19 * e_density) ** (1.0 / 3.0)
@@ -457,7 +866,9 @@ class HeliumWingSolver:
             return 0.0
         idx = _find_record(self.griem_records, wl, 0.2)
         if idx is None:
-            a = (gamma_rad + gamma_stark * self.electron_density[depth_idx]) / (doppler / wl)
+            a = (gamma_rad + gamma_stark * self.electron_density[depth_idx]) / (
+                doppler / wl
+            )
             return voigt_profile(abs(wave - wl) / doppler, a)
         record = self.griem_records[idx]
         temp = self._clamp_temp(self.temperature[depth_idx], 5000.0, 80000.0)
@@ -469,10 +880,10 @@ class HeliumWingSolver:
             if record.ttab[i] >= temp:
                 break
         x = (temp - record.ttab[it - 1]) / (record.ttab[it] - record.ttab[it - 1])
-        xx = e_density / (10.0 ** record.log_ne)
+        xx = e_density / (10.0**record.log_ne)
         width = xx * (x * record.width[it] + (1.0 - x) * record.width[it - 1])
         shift = x * record.shift[it] + (1.0 - x) * record.shift[it - 1]
-        alpha_val = xx ** 0.25 * (x * record.alpha[it] + (1.0 - x) * record.alpha[it - 1])
+        alpha_val = xx**0.25 * (x * record.alpha[it] + (1.0 - x) * record.alpha[it - 1])
         xx_ratio = xnfhp / e_density if e_density > 0.0 else 0.0
         vm1 = 8.78 * (xx_ratio + 2.0 * (1.0 - xx_ratio)) / np.sqrt(temp)
         rhom = 1.0 / (4.19 * e_density) ** (1.0 / 3.0)
@@ -497,7 +908,9 @@ class HeliumWingSolver:
             return 0.0
         idx = _find_record(self.dimitri_records, wl, 0.2)
         if idx is None:
-            return self._griem_profile(depth_idx, wave, wl, doppler, gamma_rad, gamma_stark)
+            return self._griem_profile(
+                depth_idx, wave, wl, doppler, gamma_rad, gamma_stark
+            )
         record = self.dimitri_records[idx]
         temp = self._clamp_temp(self.temperature[depth_idx], 5000.0, 80000.0)
         e_density = self.electron_density[depth_idx]
@@ -509,12 +922,14 @@ class HeliumWingSolver:
             if record.ttab[i] >= temp:
                 break
         x = (temp - record.ttab[it - 1]) / (record.ttab[it] - record.ttab[it - 1])
-        xx = e_density / (10.0 ** record.log_ne)
-        xxh = xnfhp / (10.0 ** record.log_ne)
-        xxhe = xnfhep / (10.0 ** record.log_ne)
+        xx = e_density / (10.0**record.log_ne)
+        xxh = xnfhp / (10.0**record.log_ne)
+        xxhe = xnfhep / (10.0**record.log_ne)
         width = xx * (x * record.width_e[it] + (1.0 - x) * record.width_e[it - 1])
         width_h = xxh * (x * record.width_h[it] + (1.0 - x) * record.width_h[it - 1])
-        width_he = xxhe * (x * record.width_he[it] + (1.0 - x) * record.width_he[it - 1])
+        width_he = xxhe * (
+            x * record.width_he[it] + (1.0 - x) * record.width_he[it - 1]
+        )
         shift = record.shift_e[it] + (1.0 - x) * record.shift_e[it - 1]
         shift_h = x * record.shift_h[it] + (1.0 - x) * record.shift_h[it - 1]
         shift_he = x * record.shift_he[it] + (1.0 - x) * record.shift_he[it - 1]

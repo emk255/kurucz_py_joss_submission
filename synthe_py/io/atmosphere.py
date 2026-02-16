@@ -24,6 +24,10 @@ class AtmosphereModel:
     mass_density: np.ndarray
     turbulent_velocity: np.ndarray
     metadata: Dict[str, str]
+    tkev: Optional[np.ndarray] = None
+    tk: Optional[np.ndarray] = None
+    tlog: Optional[np.ndarray] = None
+    hkt: Optional[np.ndarray] = None
     continuum_tables: Optional[ContinuumTables] = None
     continuum_frequency: Optional[np.ndarray] = None
     continuum_wledge: Optional[np.ndarray] = None
@@ -128,6 +132,10 @@ def load_cached(path: Path) -> AtmosphereModel:
 
         depth = _pick("depth", "rhox", "qrhox")
         temperature = _pick("temperature", "qt")
+        tkev = data.get("tkev")
+        tk = data.get("tk")
+        tlog = data.get("tlog")
+        hkt = data.get("hkt")
         gas_pressure = _pick("gas_pressure", "qp")
         electron_density = _pick("electron_density", "qxne")
         mass_density = _pick("mass_density", "qrho")
@@ -188,16 +196,21 @@ def load_cached(path: Path) -> AtmosphereModel:
                 population_per_ion = qx.reshape(qx.shape[0], 6, qx.shape[1] // 6)
                 # Note: qxnfpel is loaded for backward compatibility only
 
-        # CRITICAL FIX: Prioritize xnf_h over population_per_ion for xnfph!
-        # The population_per_ion array may have different normalization (e.g., divided by U)
-        # that makes it ~12x smaller than the correct value.
-        # xnf_h is the total neutral H number density which should be used for opacity.
-        # xnfph should be shape (n_layers, 2) with [H I, H II]
+        # CRITICAL FIX: xnfph must store ground-state H I (mode=11) and H II.
+        # Fortran uses XNFPH(:,1) for H I ground state and XNFPH(:,2) for H II.
+        # The NPZ stores total neutral H as xnf_h (mode=12), so we convert using U(T).
+        xnf_h_ion = data.get("xnf_h_ion")
+        if xnf_h_ion is not None:
+            xnf_h_ion = np.asarray(xnf_h_ion, dtype=np.float64)
+
         if xnfph is None and xnf_h is not None:
-            # Use xnf_h for H I population (correct total neutral H)
-            # xnf_h2 is molecular H2, use zeros for H II as placeholder
-            h2_pop = xnf_h2 if xnf_h2 is not None else np.zeros_like(xnf_h)
-            xnfph = np.column_stack([xnf_h, h2_pop])
+            from ..physics.kapp import compute_ground_state_hydrogen
+
+            ground_h = compute_ground_state_hydrogen(xnf_h, temperature)
+            if xnf_h_ion is None:
+                # Fallback: use zeros if H II is unavailable
+                xnf_h_ion = np.zeros_like(xnf_h)
+            xnfph = np.column_stack([ground_h, xnf_h_ion])
 
         # Fallback to population_per_ion only if xnf_h is not available
         if (
@@ -458,6 +471,10 @@ def load_cached(path: Path) -> AtmosphereModel:
         atmosphere = AtmosphereModel(
             depth=depth,
             temperature=temperature,
+            tkev=np.asarray(tkev, dtype=np.float64) if tkev is not None else None,
+            tk=np.asarray(tk, dtype=np.float64) if tk is not None else None,
+            tlog=np.asarray(tlog, dtype=np.float64) if tlog is not None else None,
+            hkt=np.asarray(hkt, dtype=np.float64) if hkt is not None else None,
             gas_pressure=gas_pressure,
             electron_density=electron_density,
             mass_density=mass_density,

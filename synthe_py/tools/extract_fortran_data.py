@@ -387,7 +387,10 @@ def extract_nnn_data(atlas7v_path: Path) -> np.ndarray:
     while i < len(lines):
         line = lines[i]
         
-        # Look for DATA NNN* statement
+        # Look for DATA NNN* statement (skip commented lines)
+        if line.lstrip().startswith(("c", "C")):
+            i += 1
+            continue
         if "DATA NNN" in line:
             # Extract array name (NNN01, NNN02, etc.)
             match = re.search(r"DATA\s+(NNN\d+)\s*/", line)
@@ -429,28 +432,19 @@ def extract_nnn_data(atlas7v_path: Path) -> np.ndarray:
                     
                     # Split into lines and process each
                     for data_line in data_section.split("\n"):
+                        if data_line.lstrip().startswith(("c", "C")):
+                            continue
                         # Remove continuation line markers (digits at column 1-6: "     1 ", "     2 ")
                         data_line = re.sub(r"^\s{0,5}\d+\s+", "", data_line)
                         # Remove comments (everything after capital letters like "D+F", "G", "AEL")
                         data_line = re.sub(r"\s+[A-Z][A-Z0-9.\s]*$", "", data_line)
-                        # Extract integers - match sequences of digits
-                        # The encoded values are typically 6-9 digits
-                        for match in re.finditer(r"\b(\d{4,})\b", data_line):
+                        # Extract encoded integers (NNN entries are 6-9 digits).
+                        # Avoid shorter tokens to prevent picking up line numbers or comments.
+                        for match in re.finditer(r"\b(\d{6,9})\b", data_line):
                             val_str = match.group(1)
                             try:
                                 val = int(val_str)
                                 values.append(val)
-                            except ValueError:
-                                pass
-                        
-                        # Also catch smaller numbers that might be valid (like IP values)
-                        for match in re.finditer(r"\b(\d{3,5})\b", data_line):
-                            val_str = match.group(1)
-                            try:
-                                val = int(val_str)
-                                # Keep if it's a reasonable value (not a line number)
-                                if val >= 100:
-                                    values.append(val)
                             except ValueError:
                                 pass
                 
@@ -474,16 +468,17 @@ def extract_nnn_data(atlas7v_path: Path) -> np.ndarray:
         
         if array_name in nnn_arrays:
             values = nnn_arrays[array_name]
-            # Convert 1-based Fortran index to 0-based Python
-            # NNN is (6, 374), so linear index = row*374 + col
-            # start_pos is 1-based, so subtract 1
+            # Convert 1-based Fortran linear index to 0-based Python.
+            # Fortran is column-major, with the FIRST index (I=1..6) varying fastest:
+            #   linear_idx -> I = (linear_idx % 6), N = (linear_idx // 6)
+            # This maps to NNN[I, N] in Python as row=I, col=N.
             start_idx = start_pos - 1
             
             for val_idx, val in enumerate(values):
                 linear_idx = start_idx + val_idx
                 if linear_idx < nnn.size:
-                    row = linear_idx // 374
-                    col = linear_idx % 374
+                    row = linear_idx % 6
+                    col = linear_idx // 6
                     nnn[row, col] = val
     
     return nnn

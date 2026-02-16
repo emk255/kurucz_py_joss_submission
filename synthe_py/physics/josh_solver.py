@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import numpy as np
 
 try:
@@ -27,6 +28,8 @@ from .josh_tables import (
 )
 
 EPS = 1.0e-38
+# Match Fortran REAL*4 behavior during the XS iteration.
+USE_FLOAT32_ITERATION = True
 # Convergence tolerance: Match Fortran exactly (atlas7v.for line 9950: IF(ERRORX.GT..00001))
 # Using the same tolerance ensures the iteration converges to the same solution
 ITER_TOL = 1.0e-5  # Match Fortran's 1e-5 exactly
@@ -105,6 +108,7 @@ def _josh_iteration_kernel(
     return xs, max_iter
 
 
+@jit(nopython=True, cache=True)
 def _parcoe(f: np.ndarray, x: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Parabolic coefficients matching the Fortran PARCOE routine."""
 
@@ -179,6 +183,7 @@ def _parcoe(f: np.ndarray, x: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.nd
     return a, b, c
 
 
+@jit(nopython=True, cache=True)
 def _integ(x: np.ndarray, f: np.ndarray, start: float) -> np.ndarray:
     """Numerical integral matching the Fortran INTEG routine."""
 
@@ -200,6 +205,7 @@ def _integ(x: np.ndarray, f: np.ndarray, start: float) -> np.ndarray:
     return fint
 
 
+@jit(nopython=True, cache=True)
 def _deriv(x: np.ndarray, f: np.ndarray) -> np.ndarray:
     """Derivative helper mirroring the Fortran DERIV routine."""
 
@@ -231,141 +237,113 @@ def _deriv(x: np.ndarray, f: np.ndarray) -> np.ndarray:
 def _map1_kernel(
     xold: np.ndarray, fold: np.ndarray, xnew: np.ndarray
 ) -> tuple[np.ndarray, int]:
-    """Numba-compiled kernel of Fortran MAP1 interpolation routine.
-
-    Exact match to Fortran MAP1 (atlas7v.for lines 1142-1199).
-    """
+    """Exact translation of Fortran MAP1 (atlas7v.for lines 1142-1199)."""
     nold = xold.size
     nnew = xnew.size
     fnew = np.zeros(nnew, dtype=np.float64)
     if nold == 0 or nnew == 0:
         return fnew, 0
 
-    # Port Fortran state (1-based indices in comments)
-    l = 2  # corresponds to L=2
+    # Use 1-based indexing to mirror Fortran exactly.
+    xold1 = np.empty(nold + 1, dtype=np.float64)
+    fold1 = np.empty(nold + 1, dtype=np.float64)
+    xold1[1:] = xold
+    fold1[1:] = fold
+
+    l = 2
     ll = 0
     cfor = bfor = afor = 0.0
     cbac = bbac = abac = 0.0
     a = b = c = 0.0
-    maxj = 0
 
-    for k in range(nnew):
-        xk = xnew[k]
-        goto = 10
-        max_iterations = 1000  # Safety limit
-        iteration_count = 0
-
+    for k in range(1, nnew + 1):
+        xk = xnew[k - 1]
         while True:
-            iteration_count += 1
-            if iteration_count > max_iterations:
-                # Should never happen, but safety check
-                break
-
-            if goto == 10:
-                if l <= nold and xk < xold[l - 1]:
-                    goto = 20
-                else:
-                    l += 1
-                    if l > nold:
-                        l = nold
-                        goto = 30
-                continue
-
-            if goto == 20:
+            # Label 10
+            if xk < xold1[l]:
+                # Label 20
                 if l == ll:
-                    goto = 50
-                    continue
-                # CRITICAL FIX: Fortran checks L.EQ.2 and L.EQ.3 BEFORE checking for goto 21
-                # Both L==2 and L==3 go to label 30 (backward extrapolation)
-                if l == 2:
-                    goto = 30
-                    continue
-                if l == 3:
-                    goto = 30
-                    continue
+                    break
+                if l == 2 or l == 3:
+                    # Label 30
+                    l = min(nold, l)
+                    c = 0.0
+                    b = (fold1[l] - fold1[l - 1]) / (xold1[l] - xold1[l - 1])
+                    a = fold1[l] - xold1[l] * b
+                    ll = l
+                    break
                 l1 = l - 1
-                # CRITICAL FIX: Fortran has two sequential IF statements:
-                # Line 1157: IF(L.GT.LL+1.OR.L.EQ.3)GO TO 21  (L==3 already handled above)
-                # Line 1158: IF(L.GT.LL+1.OR.L.EQ.4)GO TO 21
-                # Since these are sequential, if L > LL+1, first IF triggers
-                # If L==4 and L <= LL+1, second IF triggers
-                # So: goto 21 if L > LL+1 OR L == 4
-                if l > ll + 1 or l == 4:
-                    goto = 21
-                    continue
-                cbac = cfor
-                bbac = bfor
-                abac = afor
-                if l == nold:
-                    goto = 22
-                else:
-                    goto = 25
-                continue
-
-            if goto == 21:
-                l1 = l - 1
-                l2 = l - 2
-                denom = xold[l1 - 1] - xold[l2 - 1]
-                d = (fold[l1 - 1] - fold[l2 - 1]) / denom if denom != 0.0 else 0.0
-                denom_term = (xold[l - 1] - xold[l1 - 1]) * (xold[l - 1] - xold[l2 - 1])
-                term = fold[l - 1] / denom_term if denom_term != 0.0 else 0.0
-                denom2 = xold[l - 1] - xold[l2 - 1]
-                denom3 = xold[l - 1] - xold[l1 - 1]
-                part = 0.0
-                denom_diff = xold[l1 - 1] - xold[l2 - 1]
-                if denom_diff != 0.0:
-                    val1 = fold[l2 - 1] / denom2 if denom2 != 0.0 else 0.0
-                    val2 = fold[l1 - 1] / denom3 if denom3 != 0.0 else 0.0
-                    part = (val1 - val2) / denom_diff
-                cbac = term + part
-                bbac = d - (xold[l1 - 1] + xold[l2 - 1]) * cbac
-                abac = (
-                    fold[l2 - 1] - xold[l2 - 1] * d + xold[l1 - 1] * xold[l2 - 1] * cbac
-                )
-                if l < nold:
-                    goto = 25
-                else:
-                    goto = 22
-                continue
-
-            if goto == 22:
-                c = cbac
-                b = bbac
-                a = abac
-                ll = l
-                goto = 50
-                continue
-
-            if goto == 25:
-                l1 = l - 1
-                # Guard against degenerate spacing
-                denom = xold[l - 1] - xold[l1 - 1]
-                d = (fold[l - 1] - fold[l1 - 1]) / denom if denom != 0.0 else 0.0
-                if l >= nold:
-                    cfor = cbac
-                    bfor = bbac
-                    afor = abac
-                else:
-                    denom_term = (xold[l] - xold[l - 1]) * (xold[l] - xold[l1 - 1])
-                    term = fold[l] / denom_term if denom_term != 0.0 else 0.0
-                    denom2 = xold[l] - xold[l1 - 1]
-                    denom3 = xold[l] - xold[l - 1]
-                    denom4 = xold[l - 1] - xold[l1 - 1]
-                    part = 0.0
-                    if denom4 != 0.0:
-                        val1 = fold[l1 - 1] / denom2 if denom2 != 0.0 else 0.0
-                        val2 = fold[l - 1] / denom3 if denom3 != 0.0 else 0.0
-                        part = (val1 - val2) / denom4
-                    cfor = term + part
-                    bfor = d - (xold[l - 1] + xold[l1 - 1]) * cfor
-                    afor = (
-                        fold[l1 - 1]
-                        - xold[l1 - 1] * d
-                        + xold[l - 1] * xold[l1 - 1] * cfor
+                if l > ll + 1 or l == 3:
+                    # Label 21
+                    l2 = l - 2
+                    d = (fold1[l1] - fold1[l2]) / (xold1[l1] - xold1[l2])
+                    cbac = fold1[l] / (
+                        (xold1[l] - xold1[l1]) * (xold1[l] - xold1[l2])
+                    ) + (
+                        fold1[l2] / (xold1[l] - xold1[l2])
+                        - fold1[l1] / (xold1[l] - xold1[l1])
+                    ) / (
+                        xold1[l1] - xold1[l2]
                     )
-                # CRITICAL FIX: Match Fortran exactly (line 1184)
-                # WT=0.
-                # IF(ABS(CFOR).NE.0.)WT=ABS(CFOR)/(ABS(CFOR)+ABS(CBAC))
+                    bbac = d - (xold1[l1] + xold1[l2]) * cbac
+                    abac = fold1[l2] - xold1[l2] * d + xold1[l1] * xold1[l2] * cbac
+                    if l < nold:
+                        # Fall through to label 25 below.
+                        pass
+                    else:
+                        # Label 22
+                        c = cbac
+                        b = bbac
+                        a = abac
+                        ll = l
+                        break
+                elif l > ll + 1 or l == 4:
+                    # Label 21 (same as above)
+                    l2 = l - 2
+                    d = (fold1[l1] - fold1[l2]) / (xold1[l1] - xold1[l2])
+                    cbac = fold1[l] / (
+                        (xold1[l] - xold1[l1]) * (xold1[l] - xold1[l2])
+                    ) + (
+                        fold1[l2] / (xold1[l] - xold1[l2])
+                        - fold1[l1] / (xold1[l] - xold1[l1])
+                    ) / (
+                        xold1[l1] - xold1[l2]
+                    )
+                    bbac = d - (xold1[l1] + xold1[l2]) * cbac
+                    abac = fold1[l2] - xold1[l2] * d + xold1[l1] * xold1[l2] * cbac
+                    if l < nold:
+                        pass
+                    else:
+                        # Label 22
+                        c = cbac
+                        b = bbac
+                        a = abac
+                        ll = l
+                        break
+                else:
+                    cbac = cfor
+                    bbac = bfor
+                    abac = afor
+                    if l == nold:
+                        # Label 22
+                        c = cbac
+                        b = bbac
+                        a = abac
+                        ll = l
+                        break
+
+                # Label 25
+                d = (fold1[l] - fold1[l1]) / (xold1[l] - xold1[l1])
+                cfor = fold1[l + 1] / (
+                    (xold1[l + 1] - xold1[l]) * (xold1[l + 1] - xold1[l1])
+                ) + (
+                    fold1[l1] / (xold1[l + 1] - xold1[l1])
+                    - fold1[l] / (xold1[l + 1] - xold1[l])
+                ) / (
+                    xold1[l] - xold1[l1]
+                )
+                bfor = d - (xold1[l] + xold1[l1]) * cfor
+                afor = fold1[l1] - xold1[l1] * d + xold1[l] * xold1[l1] * cfor
                 wt = 0.0
                 if abs(cfor) != 0.0:
                     wt = abs(cfor) / (abs(cfor) + abs(cbac))
@@ -373,40 +351,22 @@ def _map1_kernel(
                 b = bfor + wt * (bbac - bfor)
                 c = cfor + wt * (cbac - cfor)
                 ll = l
-                goto = 50
-                continue
-
-            if goto == 30:
-                if l == ll:
-                    goto = 50
-                    continue
-                # CRITICAL FIX: Fortran line 1191: L=AMIN0(NOLD,L)
-                # This sets L to NOLD when doing forward extrapolation (XNEW > XOLD[-1])
-                l = min(nold, l)
-                c = 0.0
-                # CRITICAL FIX: Fortran line 1193: B=(FOLD(L)-FOLD(L-1))/(XOLD(L)-XOLD(L-1))
-                if l > 1:
-                    denom = xold[l - 1] - xold[l - 2]
-                    b = (fold[l - 1] - fold[l - 2]) / denom if denom != 0.0 else 0.0
-                else:
-                    b = 0.0
-                # CRITICAL FIX: Fortran line 1194: A=FOLD(L)-XOLD(L)*B
-                a = fold[l - 1] - xold[l - 1] * b
-                ll = l
-                goto = 50
-                continue
-
-            if goto == 50:
-                fnew[k] = a + (b + c * xk) * xk
-                # CRITICAL FIX: Fortran MAP1 returns LL-1 after processing all points
-                # Track maximum LL-1 across all iterations (final LL-1 should equal max for monotonic XOLD)
-                maxj = max(maxj, ll - 1) if ll > 0 else maxj
                 break
 
-    # CRITICAL FIX: Fortran returns the final LL-1 value (line 1197: MAP1=LL-1)
-    # Since LL only increases (or stays same) and XNEW is processed in order,
-    # maxj should equal ll-1, but we use maxj for safety
-    return fnew, maxj
+            # Continue label 10 loop.
+            l += 1
+            if l > nold:
+                # Label 30
+                l = min(nold, l)
+                c = 0.0
+                b = (fold1[l] - fold1[l - 1]) / (xold1[l] - xold1[l - 1])
+                a = fold1[l] - xold1[l] * b
+                ll = l
+                break
+
+        fnew[k - 1] = a + (b + c * xk) * xk
+
+    return fnew, ll - 1
 
 
 def _map1(
@@ -569,6 +529,35 @@ def solve_josh_flux(
     # Only ensure ABTOT >= EPS to prevent division by zero (Fortran also does this)
     abtot = np.maximum(abtot, EPS)
 
+    # Optional debug: dump ABTOT components for a specific wavelength.
+    debug_abtot_wave = os.getenv("PY_DEBUG_ABTOT_WAVE")
+    if debug_label and debug_abtot_wave:
+        try:
+            target_wave = float(debug_abtot_wave)
+        except ValueError:
+            target_wave = None
+        wl_val = None
+        if debug_label.startswith("FLUX_TOTAL_") or debug_label.startswith(
+            "FLUX_CONT_"
+        ):
+            try:
+                wl_val = float(debug_label.split("_")[-1])
+            except ValueError:
+                wl_val = None
+        if (
+            wl_val is not None
+            and target_wave is not None
+            and abs(wl_val - target_wave) < 1e-4
+        ):
+            label = "TOTAL" if debug_label.startswith("FLUX_TOTAL_") else "CONT"
+            print(f"\nPY_DEBUG ABTOT ARRAY {label}: WAVE={wl_val:.8f}")
+            for idx in range(abtot.size):
+                print(
+                    f"  L={idx+1:3d} RHOX={rho[idx]:.8E} ABTOT={abtot[idx]:.8E} "
+                    f"ACONT={acont[idx]:.8E} ALINE={aline[idx]:.8E} "
+                    f"SIGMAC={sigmac[idx]:.8E} SIGMAL={sigmal[idx]:.8E}"
+                )
+
     # CRITICAL: Check for INF/NaN (should be rare, but log if found)
     # Fortran would propagate INF/NaN, but we log a warning for debugging
     if np.any(~np.isfinite(abtot)):
@@ -633,7 +622,11 @@ def solve_josh_flux(
         except (ValueError, IndexError):
             pass
 
-    if debug or debug_long_wl or debug_problem_wl:
+    # IMPORTANT: Avoid unconditional per-wavelength stdout spam.
+    # This is extremely slow and can dominate runtime due to I/O.
+    # Preserve the ability to debug long/problem wavelengths via an explicit env flag.
+    debug_snubar_env = os.getenv("PY_DEBUG_SNUBAR") == "1"
+    if debug or (debug_snubar_env and (debug_long_wl or debug_problem_wl)):
         print(f"\nSNUBAR calculation:")
         print(f"  ACONT[0] = {acont[0]:.8E}")
         print(f"  ALINE[0] = {aline[0]:.8E}")
@@ -702,6 +695,12 @@ def solve_josh_flux(
             wavelength_nm = float(debug_label.replace("FLUX_TOTAL_", ""))
         except ValueError:
             pass
+        if (
+            debug
+            and wavelength_nm is not None
+            and abs(wavelength_nm - 418.148489) < 1e-4
+        ):
+            print(f"DEBUG: PY_DUMP_JOSH_ARRAYS={os.getenv('PY_DUMP_JOSH_ARRAYS')}")
 
     # CRITICAL FIX: Fortran convention: J=1 is surface (smallest RHOX), J=NRHOX is deep (largest RHOX)
     # Fortran's INTEG requires RHOX to be INCREASING (surface → deep): RHOX(1) < RHOX(2) < ... < RHOX(N)
@@ -753,7 +752,11 @@ def solve_josh_flux(
     if (
         debug
         and wavelength_nm is not None
-        and abs(wavelength_nm - 300.00040572) < 0.0001
+        and (
+            abs(wavelength_nm - 300.00040572) < 0.0001
+            or abs(wavelength_nm - 418.148489) < 0.0001
+            or abs(wavelength_nm - 403.188153) < 0.0001
+        )
     ):
         print(f"\n  DEBUG TAUNU START: Wavelength {wavelength_nm:.8f} nm")
         print(f"    needs_reverse: {needs_reverse}")
@@ -815,6 +818,81 @@ def solve_josh_flux(
         print(f"  ABTOT[-1] (deep) = {abtot_integ[-1]:.8E}")
         print(f"  RHOX[0] (surface) = {rho_integ[0]:.8E}")
         print(f"  RHOX[-1] (deep) = {rho_integ[-1]:.8E}")
+        wl_val = None
+        if debug_label:
+            try:
+                wl_str = debug_label.split("_")[-1]
+                wl_val = float(wl_str)
+            except (ValueError, IndexError):
+                wl_val = None
+        if wl_val is not None and (
+            abs(wl_val - 418.148489) < 0.0001 or abs(wl_val - 403.188153) < 0.0001
+        ):
+            if taunu.size > 19:
+                print(f"  TAUNU[19] = {taunu[19]:.8E}")
+            if taunu.size > 71:
+                print(f"  TAUNU[71] = {taunu[71]:.8E}")
+            if taunu.size >= 10:
+                print("  TAUNU[0:10] = " + " ".join(f"{val:.8E}" for val in taunu[:10]))
+            print(f"  ALPHA[0] = {alpha[0]:.8E}")
+            print(f"  SNUBAR[0] = {snubar[0]:.8E}")
+            if snubar.size >= 10:
+                print(
+                    "  SNUBAR[0:10] = " + " ".join(f"{val:.8E}" for val in snubar[:10])
+                )
+
+    # Optional debug: dump full TAUNU and SNUBAR arrays for a specific wavelength.
+    debug_taunu_snubar_wave = os.getenv("PY_DEBUG_TAUNU_SNUBAR_WAVE")
+    if debug_label and debug_taunu_snubar_wave:
+        try:
+            target_wave = float(debug_taunu_snubar_wave)
+        except ValueError:
+            target_wave = None
+        wl_val = None
+        if debug_label.startswith("FLUX_TOTAL_") or debug_label.startswith(
+            "FLUX_CONT_"
+        ):
+            try:
+                wl_val = float(debug_label.split("_")[-1])
+            except ValueError:
+                wl_val = None
+        if (
+            wl_val is not None
+            and target_wave is not None
+            and abs(wl_val - target_wave) < 1e-4
+        ):
+            label = "TOTAL" if debug_label.startswith("FLUX_TOTAL_") else "CONT"
+            print(f"\nPY_DEBUG TAUNU ARRAY {label}: WAVE={wl_val:.8f}")
+            for idx, val in enumerate(taunu, start=1):
+                print(f"  L={idx:3d} TAUNU={val:.8E}")
+            print(f"\nPY_DEBUG SNUBAR ARRAY {label}: WAVE={wl_val:.8f}")
+            for idx, val in enumerate(snubar, start=1):
+                print(f"  L={idx:3d} SNUBAR={val:.8E}")
+            if alpha.size >= 10:
+                print("  ALPHA[0:10] = " + " ".join(f"{val:.8E}" for val in alpha[:10]))
+            if abtot_integ.size > 71:
+                print(f"  ABTOT[71] = {abtot_integ[71]:.8E}")
+                print(f"  RHOX[71] = {rho_integ[71]:.8E}")
+            if alpha.size > 71:
+                print(f"  ALPHA[71] = {alpha[71]:.8E}")
+            dump_flag = os.getenv("PY_DUMP_JOSH_ARRAYS") == "1"
+            if dump_flag:
+                dump_wave = os.getenv("PY_DUMP_JOSH_ARRAYS_WAVE")
+                try:
+                    target_wave = float(dump_wave) if dump_wave else wl_val
+                except ValueError:
+                    target_wave = wl_val
+                if wl_val is not None and abs(wl_val - target_wave) < 1e-4:
+                    dump_path = os.getenv("PY_DUMP_JOSH_ARRAYS_PATH")
+                    if not dump_path:
+                        dump_path = f"out/josh_arrays_{wl_val:.6f}.npz"
+                    np.savez(
+                        dump_path,
+                        taunu=taunu,
+                        snubar=snubar,
+                        alpha=alpha,
+                    )
+                    print(f"  -> Dumped JOSH arrays to {dump_path}")
         if taunu[0] > XTAU_GRID[-1]:
             print(f"\n  WARNING: TAUNU[0] exceeds XTAU_GRID max!")
             print(f"    This will set MAXJ=1, which may affect flux calculation")
@@ -1003,25 +1081,11 @@ def solve_josh_flux(
             f"  TAUNU[0] > XTAU_GRID max? {taunu[0] > XTAU_GRID[-1] if taunu.size > 0 else False}"
         )
 
-    # Determine whether the scattering iteration is needed. In the legacy Fortran
-    # implementation this is controlled by the IFSCAT flag which is typically 1
-    # (scattering enabled) for both continuum and line calculations.
-    #
-    # CRITICAL FIX: For continuum-only flux calculation (IFSURF=1), Fortran uses
-    # a different code path when there are NO LINES (ALINE=0), even if there's
-    # continuum scattering. The iteration path is only used when lines are present.
-    #
-    # CRITICAL FIX: Fortran ALWAYS uses IFSCAT=1 (scattering path) for ALL calculations
-    # This means Fortran ALWAYS computes XSBAR and XALPHA, even for continuum-only.
-    # Python should match this behavior by always using the scattering path.
-    #
-    # However, iteration is only needed when lines are present AND there's scattering.
-    # For continuum-only (no lines), we skip iteration but still compute XSBAR/XALPHA.
-    has_lines = np.any(aline > 1e-40)
-
-    # Always use scattering path (XSBAR/XALPHA) to match Fortran's IFSCAT=1
-    # But iteration is only needed when lines are present AND there's scattering
-    needs_iteration = has_lines and np.any(alpha > 1e-12)
+    # Determine whether the scattering iteration is needed. In the Fortran JOSH flow,
+    # IFSCAT=1 drives the scattering path and iteration, regardless of whether lines
+    # are present. For our runs, IFSCAT is effectively 1, so iterate whenever there
+    # is non-negligible scattering.
+    needs_iteration = np.any(alpha > 1e-12)
 
     # CRITICAL: Always use scattering path (XSBAR/XALPHA) even for continuum-only
     # This matches Fortran's IFSCAT=1 behavior
@@ -1181,24 +1245,6 @@ def solve_josh_flux(
         xsbar = np.maximum(xsbar, EPS)
         xalpha = np.clip(xalpha, 0.0, 1.0)
 
-        # CRITICAL FIX: Apply mask AFTER MAP1 to match Fortran (atlas7v.for lines 9785-9787)
-        # Fortran sets XSBAR(L)=SNUBAR(1) and XALPHA(L)=ALPHA(1) when XTAU8(L) < TAUNU(1)
-        # This handles the extrapolation edge case correctly
-        if taunu.size > 0:
-            mask = XTAU_GRID < taunu[0]
-            if np.any(mask):
-                if debug:
-                    print(f"\nDEBUG: Applying mask for XTAU < TAUNU[0]:")
-                    print(f"  mask count: {np.sum(mask)} of {len(XTAU_GRID)}")
-                    print(f"  xsbar[0] (before mask) = {xsbar[0]:.8E}")
-                    print(f"  xalpha[0] (before mask) = {xalpha[0]:.8E}")
-                # Apply Fortran's mask logic (lines 9785-9787 in atlas7v.for)
-                xsbar[mask] = np.maximum(snubar[0], EPS)
-                xalpha[mask] = np.clip(alpha[0], 0.0, 1.0)
-                if debug:
-                    print(f"  xsbar[0] (after mask) = {xsbar[0]:.8E}")
-                    print(f"  xalpha[0] (after mask) = {xalpha[0]:.8E}")
-
         # CRITICAL DEBUG: Check xalpha value before (1-XALPHA) modification
         if debug:
             print(f"\nDEBUG: Before (1-XALPHA) modification:")
@@ -1208,6 +1254,21 @@ def solve_josh_flux(
             print(
                 f"  Expected xsbar_modified[0] = xsbar[0] * (1 - xalpha[0]) = {xsbar[0] * (1.0 - xalpha[0]):.8E}"
             )
+        # Apply surface-value masking when XTAU8(L) < TAUNU(1)
+        # (atlas7v.for lines ~10230-10233).
+        if taunu.size > 0:
+            mask = XTAU_GRID < taunu[0]
+            if np.any(mask):
+                if debug:
+                    print(f"\nDEBUG: Applying mask for XTAU < TAUNU[0]:")
+                    print(f"  mask count: {np.sum(mask)} of {len(XTAU_GRID)}")
+                    print(f"  xsbar[0] (before mask) = {xsbar[0]:.8E}")
+                    print(f"  xalpha[0] (before mask) = {xalpha[0]:.8E}")
+                xsbar[mask] = np.maximum(snubar[0], EPS)
+                xalpha[mask] = np.clip(alpha[0], 0.0, 1.0)
+                if debug:
+                    print(f"  xsbar[0] (after mask) = {xsbar[0]:.8E}")
+                    print(f"  xalpha[0] (after mask) = {xalpha[0]:.8E}")
 
         # Initialize XS from XSBAR (will be modified by iteration)
         xs = xsbar.copy()
@@ -1228,6 +1289,29 @@ def solve_josh_flux(
             print(
                 f"  Match: {abs(xsbar_modified[0] - xsbar[0] * (1.0 - xalpha[0])) / max(abs(xsbar[0] * (1.0 - xalpha[0])), 1e-40) < 1e-6}"
             )
+        dump_flag = os.getenv("PY_DUMP_JOSH_ARRAYS") == "1"
+        if dump_flag and debug_label and "FLUX_TOTAL_" in debug_label:
+            try:
+                wl_val = float(debug_label.replace("FLUX_TOTAL_", ""))
+            except ValueError:
+                wl_val = None
+            dump_wave = os.getenv("PY_DUMP_JOSH_ARRAYS_WAVE")
+            try:
+                target_wave = float(dump_wave) if dump_wave else wl_val
+            except ValueError:
+                target_wave = wl_val
+            if (
+                wl_val is not None
+                and target_wave is not None
+                and abs(wl_val - target_wave) < 1e-4
+            ):
+                print(
+                    "  XSBAR_MOD[0:10] = "
+                    + " ".join(f"{val:.8E}" for val in xsbar_modified[:10])
+                )
+                print(
+                    "  XALPHA[0:10] = " + " ".join(f"{val:.8E}" for val in xalpha[:10])
+                )
 
         # CRITICAL FIX: Fortran DOES iterate for surface flux until convergence!
         # Fortran code structure (lines 9102-9154):
@@ -1249,14 +1333,73 @@ def solve_josh_flux(
         # Where XSBAR(K) is AFTER (1-XALPHA) modification
         diag = 1.0 - xalpha * COEFJ_DIAG
 
-        # Always iterate until convergence, matching Fortran behavior
-        # Fortran iterates for ALL cases (including surface flux) until convergence
-        should_iterate = True  # Fortran iterates for surface flux until convergence!
+        # Initialize XS from unmodified XSBAR (after masking).
+        # Fortran sets XS(L)=XSBAR(L) before applying the (1-XALPHA) modification.
+        xs = xsbar.copy()
         num_iterations = 0  # Initialize for debug output
 
-        if should_iterate:
+        # Optional debug: mirror first-iteration K=1 sum like Fortran.
+        debug_iter_wave = os.getenv("PY_DEBUG_ITER_STEP_WAVE")
+        if debug_iter_wave and debug_label:
+            try:
+                target_wave = float(debug_iter_wave)
+            except ValueError:
+                target_wave = None
+            wl_val = None
+            if debug_label.startswith("FLUX_TOTAL_") or debug_label.startswith(
+                "FLUX_CONT_"
+            ):
+                try:
+                    wl_val = float(debug_label.split("_")[-1])
+                except ValueError:
+                    wl_val = None
+            if (
+                wl_val is not None
+                and target_wave is not None
+                and abs(wl_val - target_wave) < 1e-4
+            ):
+                xs_tmp = xs.astype(np.float32).copy()
+                coefj_dbg = COEFJ_MATRIX.astype(np.float32)
+                diag_dbg = diag.astype(np.float32)
+                xalpha_dbg = xalpha.astype(np.float32)
+                xsbar_mod_dbg = xsbar_modified.astype(np.float32)
+                nxtau = xs_tmp.size
+                for k in range(nxtau - 1, -1, -1):
+                    sum_val = float(np.dot(coefj_dbg[k, :], xs_tmp))
+                    delxs = (
+                        sum_val * xalpha_dbg[k] + xsbar_mod_dbg[k] - xs_tmp[k]
+                    ) / diag_dbg[k]
+                    if k == 0:
+                        label = (
+                            "TOTAL" if debug_label.startswith("FLUX_TOTAL_") else "CONT"
+                        )
+                        print(
+                            f"PY_DEBUG ITERATION STEP {label}: WAVE={wl_val:.8f} "
+                            f"sum(COEFJ(1,M)*XS(M))={sum_val:.8E} "
+                            f"XSBAR(1)={xsbar_modified[k]:.8E} XS(1)={xs_tmp[k]:.8E} "
+                            f"DIAG(1)={diag[k]:.8E}"
+                        )
+                        break
+                    xs_tmp[k] = max(xs_tmp[k] + delxs, EPS)
+
+        # Fortran skips the iteration when MAXJ=1 (MAP1 extrapolation edge case).
+        # In that regime XS should remain equal to XSBAR (after masking/modification).
+        if maxj != 1:
             # DEBUG: Print iteration inputs
-            debug_iteration = debug and "FLUX_CONT" in debug_label
+            debug_iteration = debug and (
+                "FLUX_CONT" in debug_label
+                or any(
+                    key in debug_label
+                    for key in (
+                        "311.304",
+                        "315.904",
+                        "317.131",
+                        "319.494",
+                        "320.973",
+                        "320.974",
+                    )
+                )
+            )
             if debug_iteration:
                 print(f"\n{'='*70}")
                 print(f"ITERATION INPUTS (before first iteration)")
@@ -1273,6 +1416,14 @@ def solve_josh_flux(
                 print(f"  First 5 XS[M] values (initialized from XSBAR):")
                 for m in range(min(5, len(xs))):
                     print(f"    XS[{m}] = {xs[m]:.8E}")
+                sum0 = float(np.dot(COEFJ_MATRIX[0, :], xs))
+                delxs0 = (sum0 * xalpha[0] + xsbar_modified[0] - xs[0]) / diag[0]
+                print(f"  ITER DEBUG K=0: sum={sum0:.8E} delxs={delxs0:.8E}")
+                # Track K=1 with current XS state (after K>1 updates)
+                if len(xs) > 1:
+                    sum1 = float(np.dot(COEFJ_MATRIX[1, :], xs))
+                    delxs1 = (sum1 * xalpha[1] + xsbar_modified[1] - xs[1]) / diag[1]
+                    print(f"  ITER DEBUG K=1: sum={sum1:.8E} delxs={delxs1:.8E}")
 
             # Use Numba kernel for iteration (required for performance)
             if not NUMBA_AVAILABLE:
@@ -1283,23 +1434,62 @@ def solve_josh_flux(
 
             # Make a copy for Numba (needs writable array)
             xs_copy = xs.copy()
-            xs_result, num_iterations = _josh_iteration_kernel(
-                COEFJ_MATRIX,
-                xs_copy,
-                xalpha,
-                xsbar_modified,
-                COEFJ_DIAG,
-                ITER_TOL,
-                MAX_ITER,
-                EPS,
-            )
-            xs[:] = xs_result  # Copy result back
+            if USE_FLOAT32_ITERATION:
+                # Fortran uses REAL*4 arrays in the XS iteration; mirror that precision.
+                coefj_f32 = COEFJ_MATRIX.astype(np.float32)
+                diag_f32 = COEFJ_DIAG.astype(np.float32)
+                xs_f32 = xs_copy.astype(np.float32)
+                xalpha_f32 = xalpha.astype(np.float32)
+                xsbar_mod_f32 = xsbar_modified.astype(np.float32)
+                xs_result_f32, num_iterations = _josh_iteration_kernel(
+                    coefj_f32,
+                    xs_f32,
+                    xalpha_f32,
+                    xsbar_mod_f32,
+                    diag_f32,
+                    np.float32(ITER_TOL),
+                    MAX_ITER,
+                    np.float32(EPS),
+                )
+                xs[:] = xs_result_f32.astype(np.float64)
+                if debug:
+                    print("DEBUG: XS iteration used float32 (REAL*4) precision")
+            else:
+                xs_result, num_iterations = _josh_iteration_kernel(
+                    COEFJ_MATRIX,
+                    xs_copy,
+                    xalpha,
+                    xsbar_modified,
+                    COEFJ_DIAG,
+                    ITER_TOL,
+                    MAX_ITER,
+                    EPS,
+                )
+                xs[:] = xs_result  # Copy result back
 
             if debug:
                 print(
                     f"DEBUG: Finished iteration loop, num_iterations={num_iterations}",
                     flush=True,
                 )
+                wl_val = None
+                if debug_label:
+                    try:
+                        wl_str = debug_label.split("_")[-1]
+                        wl_val = float(wl_str)
+                    except (ValueError, IndexError):
+                        wl_val = None
+                if wl_val is not None and (
+                    abs(wl_val - 418.148489) < 0.0001
+                    or abs(wl_val - 403.188153) < 0.0001
+                    or abs(wl_val - 319.490345) < 0.0001
+                ):
+                    print(f"\nPY_DEBUG XS418: WAVE={wl_val:.8f}")
+                    print(f"  XS[0]={xs[0]:.8E}")
+                    if xs.size > 1:
+                        print(f"  XS[1]={xs[1]:.8E}")
+                    print(f"  XSBAR[0]={xsbar[0]:.8E}")
+                    print(f"  XALPHA[0]={xalpha[0]:.8E}")
     else:
         # IFSCAT=0 path: Direct MAP1 to XS (not used in current implementation)
         # This path is not used since always_use_scattering_path = True
@@ -1330,6 +1520,31 @@ def solve_josh_flux(
             mask_before = XTAU_GRID < taunu[0]
             print(f"  Points where XTAU_GRID < TAUNU[0]: {np.sum(mask_before)}")
 
+    # Optional debug: dump XS array for a specific wavelength to compare with Fortran.
+    dump_xs_wave = os.getenv("PY_DEBUG_XS_ARRAY_WAVE")
+    if debug_label and dump_xs_wave:
+        try:
+            target_wave = float(dump_xs_wave)
+        except ValueError:
+            target_wave = None
+        wl_val = None
+        if debug_label.startswith("FLUX_TOTAL_") or debug_label.startswith(
+            "FLUX_CONT_"
+        ):
+            try:
+                wl_val = float(debug_label.split("_")[-1])
+            except ValueError:
+                wl_val = None
+        if (
+            wl_val is not None
+            and target_wave is not None
+            and abs(wl_val - target_wave) < 1e-4
+        ):
+            label = "TOTAL" if debug_label.startswith("FLUX_TOTAL_") else "CONT"
+            print(f"\nPY_DEBUG XS_ARRAY {label}: WAVE={wl_val:.8f}")
+            for idx, (xtau, xs_val) in enumerate(zip(XTAU_GRID, xs), start=1):
+                print(f"  L={idx:3d} XTAU={xtau:.8E} XS={xs_val:.8E}")
+
     # When TAUNU is constant (or nearly constant) and > XTAU_GRID max, MAP1 can't
     # extrapolate properly because linear extrapolation requires TAUNU to vary.
     # However, we should still let MAP1 try to extrapolate, as Fortran does.
@@ -1358,105 +1573,106 @@ def solve_josh_flux(
         for i in range(len(xsbar)):
             print(f"    XSBAR[{i}] = {xsbar[i]:.8E}")
 
-    # For continuum-only case, XS is already initialized from MAP1(TAUNU,SNUBAR,...) above
-    # For scattering case, XS is initialized from XSBAR above
-    # Now we just need to handle MAXJ=1 case for scattering
-    if needs_iteration:
-        # Scattering case: XS was initialized from XSBAR above
-        # Handle MAXJ=1 case (when TAUNU[0] > XTAU_GRID[-1])
-        if maxj == 1:
-            # MAXJ=1 means TAUNU[0] > XTAU_GRID[-1] = 20
-            # Fortran uses the Feautrier method iteration (atlas7v.for lines 9911-9936):
-            #   1. SNU(J) = SNUBAR(J) for all depths
-            #   2. Loop until convergence:
-            #      a. DERIV: HNU = d(SNU)/d(τ)
-            #      b. HNU = HNU / 3
-            #      c. DERIV: JMINS = d(HNU)/d(τ)
-            #      d. JNU(J) = JMINS(J) + SNU(J)
-            #      e. SNEW = (1-α)*SNUBAR + α*JNU
-            #      f. SNU(J) = SNEW
-            #   3. When converged: KNU(1) = JNU(1) / 3
+    # For continuum-only case, XS is already initialized from MAP1(TAUNU,SNUBAR,...) above.
+    # For scattering case, XS is initialized from XSBAR above.
+    # MAXJ=1 has two regimes:
+    # - If TAUNU(1) > XTAU_GRID[-1], Fortran runs the Feautrier MAXJ=1 path.
+    # - If TAUNU(1) <= XTAU_GRID[-1], Fortran uses XS/CH directly (no Feautrier).
+    if needs_iteration and maxj == 1 and taunu.size > 0 and taunu[0] > XTAU_GRID[-1]:
+        tau_surface = taunu[0]
+        nrhox = len(taunu)
 
-            tau_surface = taunu[0]
-            nrhox = len(taunu)
+        if debug:
+            print(f"\nMAXJ=1 FEAUTRIER ITERATION: TAUNU[0] = {tau_surface:.2f}")
+            print(f"  NRHOX = {nrhox}")
+            print(f"  SNUBAR[0] = {snubar[0]:.6e}")
+            print(f"  SNUBAR[-1] = {snubar[-1]:.6e}")
+            print(f"  ALPHA[0] = {alpha[0]:.6e}")
 
-            if debug:
-                print(f"\nMAXJ=1 FEAUTRIER ITERATION: TAUNU[0] = {tau_surface:.2f}")
-                print(f"  NRHOX = {nrhox}")
-                print(f"  SNUBAR[0] = {snubar[0]:.6e}")
-                print(f"  SNUBAR[-1] = {snubar[-1]:.6e}")
-                print(f"  ALPHA[0] = {alpha[0]:.6e}")
+        # Initialize SNU = SNUBAR (all depths)
+        snu = snubar.copy()
 
-            # Initialize SNU = SNUBAR (all depths)
-            snu = snubar.copy()
+        # Feautrier iteration (max NXTAU iterations, matching Fortran)
+        max_feautrier_iter = NXTAU
+        converged = False
 
-            # Feautrier iteration (max NXTAU iterations, matching Fortran)
-            max_feautrier_iter = NXTAU
-            converged = False
+        for feautrier_iter in range(max_feautrier_iter):
+            error = 0.0
 
-            for feautrier_iter in range(max_feautrier_iter):
-                error = 0.0
+            # Step 1: HNU = d(SNU)/d(τ) using DERIV
+            hnu = _deriv(taunu, snu)
 
-                # Step 1: HNU = d(SNU)/d(τ) using DERIV
-                hnu = _deriv(taunu, snu)
+            # Step 2: HNU = HNU / 3 (Eddington factor)
+            hnu = hnu / 3.0
 
-                # Step 2: HNU = HNU / 3 (Eddington factor)
-                hnu = hnu / 3.0
+            # Step 3: JMINS = d(HNU)/d(τ) using DERIV
+            jmins = _deriv(taunu, hnu)
 
-                # Step 3: JMINS = d(HNU)/d(τ) using DERIV
-                jmins = _deriv(taunu, hnu)
+            # Step 4: JNU = JMINS + SNU
+            jnu = jmins + snu
 
-                # Step 4: JNU = JMINS + SNU
-                jnu = jmins + snu
+            # Step 5 & 6: SNEW = (1-α)*SNUBAR + α*JNU, then SNU = SNEW
+            # Track convergence error
+            for j in range(nrhox):
+                snew = (1.0 - alpha[j]) * snubar[j] + alpha[j] * jnu[j]
+                if snew > 0:
+                    error += abs(snew - snu[j]) / snew
+                snu[j] = snew
 
-                # Step 5 & 6: SNEW = (1-α)*SNUBAR + α*JNU, then SNU = SNEW
-                # Track convergence error
-                for j in range(nrhox):
-                    snew = (1.0 - alpha[j]) * snubar[j] + alpha[j] * jnu[j]
-                    if snew > 0:
-                        error += abs(snew - snu[j]) / snew
-                    snu[j] = snew
-
-                if debug and feautrier_iter == 0:
-                    print(f"\n  First Feautrier iteration:")
-                    print(f"    HNU[0] = {hnu[0]:.6e}")
-                    print(f"    JMINS[0] = {jmins[0]:.6e}")
-                    print(f"    JNU[0] = {jnu[0]:.6e}")
-                    print(f"    SNU[0] (new) = {snu[0]:.6e}")
-                    print(f"    Error = {error:.6e}")
-
-                # Check convergence (Fortran uses 1e-5)
-                if error < 1e-5:
-                    converged = True
-                    break
-
-            # CRITICAL: Fortran's SPECTRV uses HNU(1), NOT KNU(1)=JNU(1)/3
-            # When MAXJ=1, JOSH sets KNU(1)=JNU(1)/3 and returns
-            # But HNU(1) still contains d(SNU)/d(τ)/3 from the DERIV call
-            # SPECTRV then uses HNU(1) for the surface flux (line 325: RESID=HNU(1)/SURF(MU))
-            # This is a bug in Fortran, but we must match it for accuracy
-            flux_hnu = hnu[0]  # Use HNU[0] to match Fortran's SPECTRV behavior
-            flux_knu = jnu[0] / 3.0  # What KNU(1) would be (correct physics)
-
-            if debug:
-                print(f"\n  Feautrier result (MAXJ=1):")
-                print(f"    Iterations: {feautrier_iter + 1}")
-                print(f"    Converged: {converged}")
-                print(f"    HNU[0] = {hnu[0]:.6e} (what Fortran SPECTRV uses)")
+            if debug and feautrier_iter == 0:
+                print(f"\n  First Feautrier iteration:")
+                print(f"    HNU[0] = {hnu[0]:.6e}")
+                print(f"    JMINS[0] = {jmins[0]:.6e}")
                 print(f"    JNU[0] = {jnu[0]:.6e}")
-                print(f"    KNU[0] = JNU[0]/3 = {flux_knu:.6e} (correct physics)")
-                print(
-                    f"    Ratio KNU/HNU = {flux_knu / flux_hnu:.1f}x"
-                    if flux_hnu != 0
-                    else "    Ratio = N/A"
+                print(f"    SNU[0] (new) = {snu[0]:.6e}")
+                print(f"    Error = {error:.6e}")
+
+            # Check convergence (Fortran uses 1e-5)
+            if error < 1e-5:
+                converged = True
+                break
+
+        # Fortran SPECTRV uses HNU(1) for the surface flux in this regime.
+        flux_hnu = hnu[0]
+        flux_knu = jnu[0] / 3.0
+
+        if debug:
+            print(f"\n  Feautrier result (MAXJ=1):")
+            print(f"    Iterations: {feautrier_iter + 1}")
+            print(f"    Converged: {converged}")
+            print(f"    HNU[0] = {hnu[0]:.6e} (what Fortran SPECTRV uses)")
+            print(f"    JNU[0] = {jnu[0]:.6e}")
+            print(f"    KNU[0] = JNU[0]/3 = {flux_knu:.6e} (correct physics)")
+            print(
+                f"    Ratio KNU/HNU = {flux_knu / flux_hnu:.1f}x"
+                if flux_hnu != 0
+                else "    Ratio = N/A"
+            )
+            print(f"    Returning HNU[0] to match Fortran SPECTRV")
+
+        dump_flag = os.getenv("PY_DUMP_JOSH_ARRAYS") == "1"
+        if dump_flag and wavelength_nm is not None:
+            dump_wave = os.getenv("PY_DUMP_JOSH_ARRAYS_WAVE")
+            try:
+                target_wave = float(dump_wave) if dump_wave else wavelength_nm
+            except ValueError:
+                target_wave = wavelength_nm
+            if abs(wavelength_nm - target_wave) < 1e-4:
+                dump_path = os.getenv("PY_DUMP_JOSH_ARRAYS_PATH")
+                if not dump_path:
+                    dump_path = f"out/josh_arrays_{wavelength_nm:.6f}.npz"
+                np.savez(
+                    dump_path,
+                    taunu=taunu,
+                    snubar=snubar,
+                    alpha=alpha,
                 )
-                print(f"    Returning HNU[0] to match Fortran SPECTRV")
+                print(f"  -> Dumped JOSH arrays to {dump_path}")
 
-            return flux_hnu
-
-        else:
-            # Standard case: XS was initialized from XSBAR
-            pass
+        return flux_hnu
+    elif needs_iteration and maxj == 1:
+        if debug:
+            print("\nMAXJ=1: Skipping Feautrier; using XS/CH flux directly")
 
     if debug:
         if xs.size > 0:
@@ -1475,15 +1691,15 @@ def solve_josh_flux(
         )
     if debug:
         if num_iterations > 0:
-            print(f"\nFlux calculation (IFSURF=1): Iterated XS (lines present)")
+            print(f"\nFlux calculation (IFSURF=0): Iterated XS (lines present)")
             print(f"  Iterations performed: {num_iterations}")
         else:
             if needs_iteration:
                 print(
-                    f"\nFlux calculation (IFSURF=1): No iteration (surface flux, XSBAR/XALPHA path)"
+                    f"\nFlux calculation (IFSURF=0): No iteration (surface flux, XSBAR/XALPHA path)"
                 )
             else:
-                print(f"\nFlux calculation (IFSURF=1): No iteration (continuum-only)")
+                print(f"\nFlux calculation (IFSURF=0): No iteration (continuum-only)")
             print(f"  Iterations performed: {num_iterations}")
         print(f"  XS[0] (before iteration): {xsbar[0]:.8E}")
         print(f"  XS[0] (after iteration): {xs[0]:.8E}")
@@ -1501,20 +1717,62 @@ def solve_josh_flux(
         # Print first 10 and last 10 XS values for detailed comparison
         print(f"\n  XS array (first 10, after iteration):")
         for i in range(min(10, len(xs))):
-            contrib = CH_WEIGHTS[i] * xs[i] if i < len(CH_WEIGHTS) else 0
+            contrib = CK_WEIGHTS[i] * xs[i] if i < len(CK_WEIGHTS) else 0
             print(
-                f"    XS[{i}] = {xs[i]:.8E}, CH[{i}] = {CH_WEIGHTS[i]:.8E}, contrib = {contrib:.8E}"
+                f"    XS[{i}] = {xs[i]:.8E}, CK[{i}] = {CK_WEIGHTS[i]:.8E}, contrib = {contrib:.8E}"
             )
         if len(xs) > 20:
             print(f"  XS array (last 10, after iteration):")
             for i in range(max(10, len(xs) - 10), len(xs)):
-                contrib = CH_WEIGHTS[i] * xs[i] if i < len(CH_WEIGHTS) else 0
+                contrib = CK_WEIGHTS[i] * xs[i] if i < len(CK_WEIGHTS) else 0
                 print(
-                    f"    XS[{i}] = {xs[i]:.8E}, CH[{i}] = {CH_WEIGHTS[i]:.8E}, contrib = {contrib:.8E}"
+                    f"    XS[{i}] = {xs[i]:.8E}, CK[{i}] = {CK_WEIGHTS[i]:.8E}, contrib = {contrib:.8E}"
                 )
 
-    # Convert CH_WEIGHTS to same dtype for precision matching
-    ch_weights = np.asarray(CH_WEIGHTS, dtype=xs.dtype)
+    # Targeted debug for 311-321 nm outliers: capture XS/XSBAR/XALPHA/MAXJ
+    if debug and debug_label and "FLUX_TOTAL_" in debug_label:
+        try:
+            wl_val = float(debug_label.replace("FLUX_TOTAL_", ""))
+        except ValueError:
+            wl_val = None
+        if wl_val is not None:
+            outlier_wls = {
+                320.973013,
+                311.304157,
+                317.130618,
+                315.903591,
+                315.904644,
+                317.122162,
+                311.305195,
+                311.303120,
+                319.494605,
+                320.974083,
+                317.131676,
+                320.979432,
+                320.978363,
+                320.971943,
+                311.302082,
+                315.910962,
+                320.975153,
+                317.121105,
+                319.493540,
+                320.977293,
+            }
+            if any(abs(wl_val - dwl) < 0.001 for dwl in outlier_wls):
+                print(
+                    "DEBUG PY XS311-321:",
+                    f"WL={wl_val:.8f}",
+                    f"XS0={xs[0]:.8E}",
+                    f"XSBAR0={xsbar[0]:.8E}",
+                    f"XALPHA0={xalpha[0]:.8E}",
+                    f"MAXJ={maxj}",
+                    flush=True,
+                )
+
+    # For surface flux (HNU), Fortran uses CH weights at label 60.
+    # CK weights are used for KNU in the IFSURF=0 branch (label 50).
+    # This solver returns HNU, so use CH_WEIGHTS to match Fortran.
+    flux_weights = np.asarray(CH_WEIGHTS, dtype=xs.dtype)
 
     # CRITICAL DEBUG: Print BEFORE flux calculation to verify we reach this point
     # Force flush to ensure output appears immediately
@@ -1530,7 +1788,7 @@ def solve_josh_flux(
             print(f"  xs all zeros? {np.all(xs == 0.0)}", flush=True)
         else:
             print(f"  xs is empty", flush=True)
-        print(f"  ch_weights.size: {ch_weights.size}", flush=True)
+        print(f"  flux_weights.size: {flux_weights.size}", flush=True)
         if len(CH_WEIGHTS) > 0:
             print(f"  CH_WEIGHTS[0]: {CH_WEIGHTS[0]:.8E}", flush=True)
             print(f"  CH_WEIGHTS sum: {np.sum(CH_WEIGHTS):.8E}", flush=True)
@@ -1538,7 +1796,7 @@ def solve_josh_flux(
             print(f"  CH_WEIGHTS is empty", flush=True)
         print(f"{'='*70}\n", flush=True)
 
-    flux = float(np.dot(ch_weights, xs))
+    flux = float(np.dot(flux_weights, xs))
 
     # Also print flux result immediately
     if debug:
@@ -1576,16 +1834,18 @@ def solve_josh_flux(
         print(f"  XS min/max: {xs.min():.8E} / {xs.max():.8E}")
         print(f"  XS all zeros? {np.all(xs == 0.0)}")
         print(f"  XS first 5: {xs[:5] if xs.size >= 5 else xs}")
-        print(f"  CH_WEIGHTS size: {ch_weights.size}")
-        print(f"  CH_WEIGHTS min/max: {ch_weights.min():.8E} / {ch_weights.max():.8E}")
-        print(f"  CH_WEIGHTS sum: {np.sum(ch_weights):.8E}")
+        print(f"  CH_WEIGHTS size: {flux_weights.size}")
         print(
-            f"  CH_WEIGHTS first 5: {ch_weights[:5] if ch_weights.size >= 5 else ch_weights}"
+            f"  CH_WEIGHTS min/max: {flux_weights.min():.8E} / {flux_weights.max():.8E}"
+        )
+        print(f"  CH_WEIGHTS sum: {np.sum(flux_weights):.8E}")
+        print(
+            f"  CH_WEIGHTS first 5: {flux_weights[:5] if flux_weights.size >= 5 else flux_weights}"
         )
         print(f"  dot product components (first 5):")
         for i in range(min(5, len(xs))):
             print(
-                f"    CH[{i}] * XS[{i}] = {ch_weights[i]:.8E} * {xs[i]:.8E} = {ch_weights[i] * xs[i]:.8E}"
+                f"    CH[{i}] * XS[{i}] = {flux_weights[i]:.8E} * {xs[i]:.8E} = {flux_weights[i] * xs[i]:.8E}"
             )
         print(f"  TAUNU size: {taunu.size if taunu.size > 0 else 0}")
         if taunu.size > 0:
@@ -1612,8 +1872,8 @@ def solve_josh_flux(
         print(f"  XSBAR[-1] = {xsbar[-1]:.8E}")
         print(f"  XS[0] = {xs[0]:.8E}")
         print(f"  XS[-1] = {xs[-1]:.8E}")
-        print(f"  CH_WEIGHTS[0] = {ch_weights[0]:.8E}")
-        print(f"  CH_WEIGHTS[-1] = {ch_weights[-1]:.8E}")
+        print(f"  CK_WEIGHTS[0] = {flux_weights[0]:.8E}")
+        print(f"  CK_WEIGHTS[-1] = {flux_weights[-1]:.8E}")
         print(f"  Flux = {flux:.8E}")
         print(f"  SNUBAR[0] = {snubar[0]:.8E}")
         print(f"  SCONT[0] = {scont[0]:.8E}")
@@ -1623,10 +1883,10 @@ def solve_josh_flux(
 
     if debug:
         print(f"\nFinal flux calculation:")
-        print(f"  CH_WEIGHTS sum = {np.sum(ch_weights):.8E}")
-        print(f"  CH_WEIGHTS[0] = {ch_weights[0]:.8E}")
-        print(f"  CH_WEIGHTS[-1] = {ch_weights[-1]:.8E}")
-        print(f"  Flux = dot(CH_WEIGHTS, XS) = {flux:.8E}")
+        print(f"  CK_WEIGHTS sum = {np.sum(flux_weights):.8E}")
+        print(f"  CK_WEIGHTS[0] = {flux_weights[0]:.8E}")
+        print(f"  CK_WEIGHTS[-1] = {flux_weights[-1]:.8E}")
+        print(f"  Flux = dot(CK_WEIGHTS, XS) = {flux:.8E}")
         print(f"{'='*70}\n")
 
     # NOTE: 4π correction was temporarily applied but caused flux > continuum (physically wrong)
@@ -1638,5 +1898,27 @@ def solve_josh_flux(
     # the JOSH solver - it uses the raw SURF(1) value directly. We should do the same.
     #
     # TODO: Investigate root cause of flux discrepancy without applying ad-hoc corrections.
+
+    dump_flag = os.getenv("PY_DUMP_JOSH_ARRAYS") == "1"
+    if dump_flag and wavelength_nm is not None:
+        dump_wave = os.getenv("PY_DUMP_JOSH_ARRAYS_WAVE")
+        try:
+            target_wave = float(dump_wave) if dump_wave else wavelength_nm
+        except ValueError:
+            target_wave = wavelength_nm
+        if abs(wavelength_nm - target_wave) < 1e-4:
+            dump_path = os.getenv("PY_DUMP_JOSH_ARRAYS_PATH")
+            if not dump_path:
+                dump_path = f"out/josh_arrays_{wavelength_nm:.6f}.npz"
+            np.savez(
+                dump_path,
+                taunu=taunu,
+                snubar=snubar,
+                alpha=alpha,
+                xs=xs,
+            )
+            print(f"  -> Dumped JOSH arrays to {dump_path}")
+            print("  XS[0:10] = " + " ".join(f"{val:.8E}" for val in xs[:10]))
+            print(f"  -> Dumped JOSH arrays to {dump_path}")
 
     return flux

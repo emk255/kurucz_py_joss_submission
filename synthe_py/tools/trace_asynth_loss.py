@@ -226,7 +226,8 @@ def trace_line(
     gamma_total = rec.gamma_rad + rec.gamma_stark * xne + rec.gamma_vdw * txnxn
     doppler_width = dop_val * rec.wavelength
     delta_nu_doppler = (C_LIGHT_NM / rec.wavelength) * dop_val
-    adamp = gamma_total / (4.0 * math.pi * delta_nu_doppler)
+    # Fortran: ADAMP = gamma_total / DOPPLE (gamma is pre-normalized by 4πν)
+    adamp = gamma_total / dop_val if dop_val > 0 else 0.0
     
     print(f"\n  Damping:")
     print(f"    gamma_rad = {rec.gamma_rad:.3e}")

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 from pathlib import Path
 import struct
 from typing import Iterator, Iterable, Sequence
@@ -10,7 +11,17 @@ from enum import IntEnum
 
 import numpy as np
 
+from . import atomic
+
 _RECORD_STRUCT = struct.Struct("<dffiiiiii fffii".replace(" ", ""))
+
+_C_LIGHT_NM = 2.99792458e17
+_CGF_FACTOR = 0.026538 / 1.77245
+_CODEX = np.array(
+    [1.0, 2.0, 2.01, 6.0, 6.01, 12.0, 12.01, 13.0, 13.01, 14.0, 14.01, 20.0, 20.01, 8.0, 11.0, 5.0, 19.0],
+    dtype=np.float64,
+)
+_DELLIM = np.array([100.0, 30.0, 10.0, 3.0, 1.0, 0.3, 0.1], dtype=np.float64)
 
 
 class Fort19WingType(IntEnum):
@@ -197,6 +208,181 @@ def load(path: Path) -> Fort19Data:
             gamma_w.append(gamma_vdw)
             nbuff_vals.append(nbuff_val)
             limb_vals.append(limb_val)
+
+    line_type_array = np.asarray(linetype, dtype=np.int16)
+    return Fort19Data(
+        wavelength_vacuum=np.asarray(wavelengths, dtype=np.float64),
+        energy_lower=np.asarray(energies, dtype=np.float32),
+        oscillator_strength=np.asarray(gfs, dtype=np.float32),
+        n_lower=np.asarray(nblo, dtype=np.int16),
+        n_upper=np.asarray(nbup, dtype=np.int16),
+        ion_index=np.asarray(nelion, dtype=np.int16),
+        line_type=line_type_array,
+        continuum_index=np.asarray(ncon, dtype=np.int16),
+        element_index=np.asarray(nelionx, dtype=np.int16),
+        gamma_rad=np.asarray(gamma_r, dtype=np.float32),
+        gamma_stark=np.asarray(gamma_s, dtype=np.float32),
+        gamma_vdw=np.asarray(gamma_w, dtype=np.float32),
+        nbuff=np.asarray(nbuff_vals, dtype=np.int32),
+        limb=np.asarray(limb_vals, dtype=np.int32),
+        wing_type=_classify_line_types(line_type_array),
+    )
+
+
+def build_from_catalog(
+    catalog: atomic.LineCatalog,
+    wlbeg: float,
+    wlend: float,
+    resolution: float,
+) -> Fort19Data:
+    """Generate fort.19-equivalent metadata from the atomic catalog (rgfall.for logic)."""
+
+    if len(catalog.records) == 0:
+        return Fort19Data(
+            wavelength_vacuum=np.array([], dtype=np.float64),
+            energy_lower=np.array([], dtype=np.float32),
+            oscillator_strength=np.array([], dtype=np.float32),
+            n_lower=np.array([], dtype=np.int16),
+            n_upper=np.array([], dtype=np.int16),
+            ion_index=np.array([], dtype=np.int16),
+            line_type=np.array([], dtype=np.int16),
+            continuum_index=np.array([], dtype=np.int16),
+            element_index=np.array([], dtype=np.int16),
+            gamma_rad=np.array([], dtype=np.float32),
+            gamma_stark=np.array([], dtype=np.float32),
+            gamma_vdw=np.array([], dtype=np.float32),
+            nbuff=np.array([], dtype=np.int32),
+            limb=np.array([], dtype=np.int32),
+            wing_type=np.array([], dtype=object),
+        )
+
+    ratio = 1.0 + 1.0 / resolution
+    ratiolg = math.log(ratio)
+    # Match rgfall.for integer assignment:
+    #   IXWLBEG=DLOG(WLBEG)/RATIOLG
+    # where IXWLBEG is INTEGER (floor for positive values).
+    ixwlbeg = math.floor(math.log(wlbeg) / ratiolg)
+    if math.exp(ixwlbeg * ratiolg) < wlbeg:
+        ixwlbeg += 1
+
+    delfactor = 1.0 if wlbeg <= 500.0 else wlbeg / 500.0
+
+    wavelengths: list[float] = []
+    energies: list[float] = []
+    gfs: list[float] = []
+    nblo: list[int] = []
+    nbup: list[int] = []
+    nelion: list[int] = []
+    linetype: list[int] = []
+    ncon: list[int] = []
+    nelionx: list[int] = []
+    gamma_r: list[float] = []
+    gamma_s: list[float] = []
+    gamma_w: list[float] = []
+    nbuff_vals: list[int] = []
+    limb_vals: list[int] = []
+
+    for rec in catalog.records:
+        wlvac = float(rec.wavelength)
+
+        # Match rgfall.for lines 145-147:
+        #   LIM=MIN(8-LINESIZE,7)
+        #   IF(CODE.EQ.1.)LIM=1
+        linesize = rec.line_size if rec.line_size > 0 else 0
+        lim = min(8 - linesize, 7)
+        code_for_lim = float(rec.code) if rec.code > 0.0 else 0.0
+        if abs(code_for_lim - 1.0) < 1.0e-6:
+            lim = 1
+        margin = _DELLIM[lim - 1] * delfactor
+        if wlvac < wlbeg - margin or wlvac > wlend + margin:
+            continue
+
+        line_type = int(rec.line_type)
+        gf_linear = 10.0 ** float(rec.log_gf)
+
+        if rec.labelp.strip().upper().startswith("CONTINUU"):
+            nlast = int(rec.xjp) if rec.xjp > 0.0 else int(rec.n_upper)
+            line_type = nlast
+            gf_linear *= (2.0 * float(rec.xj) + 1.0)
+
+        # rgfall.for line 150: coronal approximation lines are skipped.
+        if line_type == 2:
+            continue
+
+        code = float(rec.code) if rec.code > 0.0 else 0.0
+        if code <= 0.0:
+            # Fallback: derive CODE from element + ion stage
+            try:
+                nelem = atomic._ELEMENT_SYMBOLS.index(rec.element)
+            except ValueError:
+                nelem = 0
+            if nelem > 0:
+                code = nelem + (rec.ion_stage - 1) * 0.01
+
+        nelem = int(code + 1.0e-6) if code > 0.0 else 0
+        icharge = int((code - nelem) * 100.0 + 0.1) if code > 0.0 else 0
+        zeff = icharge + 1
+        nelion_val = nelem * 6 - 6 + int(zeff)
+        if nelem > 19 and nelem < 29 and icharge > 5:
+            nelion_val = 6 * (nelem + icharge * 10 - 30) - 1
+
+        nelionx_val = 0
+        if code > 0.0:
+            match = np.nonzero(np.isclose(_CODEX, code, rtol=0.0, atol=1e-3))[0]
+            if match.size > 0:
+                nelionx_val = int(match[0]) + 1
+
+        nblo_val = abs(int(rec.n_lower))
+        nbup_val = abs(int(rec.n_upper))
+        ncon_val = rec.iso2 if rec.iso1 == 0 and rec.iso2 > 0 else 0
+
+        ixwl = math.log(wlvac) / ratiolg + 0.5
+        nbuff = int(ixwl) - int(ixwlbeg) + 1
+
+        # rgfall routing:
+        # - TYPE=1 or TYPE>3 => fort.19
+        # - otherwise lines with NBLO+NBUP != 0 => fort.19
+        include = (line_type == 1 or line_type > 3 or (nblo_val + nbup_val) != 0)
+
+        if not include:
+            continue
+
+        if line_type == 1 or line_type > 3:
+            gammar = rec.gamma_rad
+            if rec.gamma_stark_log > 0.0:
+                gammas_linear = -10.0 ** (-rec.gamma_stark_log)
+            else:
+                gammas_linear = rec.gamma_stark
+            gammas = gammas_linear
+            gammaw = rec.gamma_vdw
+        else:
+            freq_hz = _C_LIGHT_NM / wlvac
+            denom = 12.5664 * freq_hz
+            gammar = rec.gamma_rad / denom
+            gammas = rec.gamma_stark / denom
+            gammaw = rec.gamma_vdw / denom
+
+        # rgfall.for EQUIVALENCE (GF,G,CGF): line 267 assignment to CGF
+        # aliases GF for TYPE<=3 (except TYPE=1), before WRITE(19).
+        gf_for_write = gf_linear
+        if line_type != 1 and line_type <= 3:
+            freq_hz = _C_LIGHT_NM / max(wlvac, 1.0e-30)
+            gf_for_write = _CGF_FACTOR * gf_linear / freq_hz
+
+        wavelengths.append(wlvac)
+        energies.append(float(rec.excitation_energy))
+        gfs.append(float(gf_for_write))
+        nblo.append(int(nblo_val))
+        nbup.append(int(nbup_val))
+        nelion.append(int(nelion_val))
+        linetype.append(int(line_type))
+        ncon.append(int(ncon_val))
+        nelionx.append(int(nelionx_val))
+        gamma_r.append(float(gammar))
+        gamma_s.append(float(gammas))
+        gamma_w.append(float(gammaw))
+        nbuff_vals.append(int(nbuff))
+        limb_vals.append(int(lim))
 
     line_type_array = np.asarray(linetype, dtype=np.int16)
     return Fort19Data(

@@ -273,58 +273,119 @@ def _voigt_reference_tables() -> Tuple[np.ndarray, np.ndarray]:
 
 
 def _map1_interpolate(xold: np.ndarray, fold: np.ndarray, xnew: np.ndarray) -> np.ndarray:
-    """Faithful translation of the MAP1 routine (cubic interpolation)."""
+    """Exact port of the Fortran MAP1 routine used by TABVOIGT."""
 
     nold = xold.size
+    nnew = xnew.size
     fnew = np.zeros_like(xnew, dtype=np.float64)
 
-    l = 1
-    ll = -1
-    for k, x in enumerate(xnew):
-        while l < nold and x >= xold[l]:
-            l += 1
+    # 1-based working arrays to mirror Fortran indexing.
+    xold1 = np.zeros(nold + 1, dtype=np.float64)
+    fold1 = np.zeros(nold + 1, dtype=np.float64)
+    xold1[1:] = xold
+    fold1[1:] = fold
 
-        if l == ll:
-            fnew[k] = fnew[k - 1] if k else fold[0]
+    l = 2
+    ll = 0
+    a = b = c = 0.0
+    abac = bbac = cbac = 0.0
+    afor = bfor = cfor = 0.0
+
+    for k in range(1, nnew + 1):
+        x = float(xnew[k - 1])
+
+        # Label 10 loop
+        while True:
+            if x < xold1[l]:
+                break
+            l += 1
+            if l > nold:
+                break
+
+        # Label 30: boundary/extrapolation
+        if l > nold:
+            if l != ll:
+                l = min(nold, l)
+                c = 0.0
+                b = (fold1[l] - fold1[l - 1]) / (xold1[l] - xold1[l - 1])
+                a = fold1[l] - xold1[l] * b
+                ll = l
+            fnew[k - 1] = a + (b + c * x) * x
             continue
 
-        if l <= 1 or l >= nold:
-            l = max(1, min(l, nold - 1))
-            c = 0.0
-            b = (fold[l] - fold[l - 1]) / (xold[l] - xold[l - 1])
-            a = fold[l - 1] - xold[l - 1] * b
-            ll = l
-            fnew[k] = a + b * x
+        # Label 20
+        if l == ll:
+            fnew[k - 1] = a + (b + c * x) * x
+            continue
+
+        if l == 2:
+            if l != ll:
+                c = 0.0
+                b = (fold1[l] - fold1[l - 1]) / (xold1[l] - xold1[l - 1])
+                a = fold1[l] - xold1[l] * b
+                ll = l
+            fnew[k - 1] = a + (b + c * x) * x
             continue
 
         l1 = l - 1
-        l2 = l - 2
-        d = (fold[l1] - fold[l2]) / (xold[l1] - xold[l2])
-        cback = (
-            fold[l] / ((xold[l] - xold[l1]) * (xold[l] - xold[l2]))
-            + (fold[l2] / (xold[l] - xold[l2]) - fold[l1] / (xold[l] - xold[l1]))
-            / (xold[l1] - xold[l2])
-        )
-        bback = d - (xold[l1] + xold[l2]) * cback
-        aback = fold[l2] - xold[l2] * d + xold[l1] * xold[l2] * cback
 
-        if l < nold - 1:
-            d = (fold[l] - fold[l1]) / (xold[l] - xold[l1])
-            cfor = (
-                fold[l + 1] / ((xold[l + 1] - xold[l]) * (xold[l + 1] - xold[l1]))
-                + (fold[l1] / (xold[l + 1] - xold[l1]) - fold[l] / (xold[l + 1] - xold[l]))
-                / (xold[l] - xold[l1])
+        if l > ll + 1 or l == 3:
+            # Label 21
+            l2 = l - 2
+            d = (fold1[l1] - fold1[l2]) / (xold1[l1] - xold1[l2])
+            cbac = (
+                fold1[l]
+                / ((xold1[l] - xold1[l1]) * (xold1[l] - xold1[l2]))
+                + (
+                    fold1[l2] / (xold1[l] - xold1[l2])
+                    - fold1[l1] / (xold1[l] - xold1[l1])
+                )
+                / (xold1[l1] - xold1[l2])
             )
-            bfor = d - (xold[l] + xold[l1]) * cfor
-            afor = fold[l1] - xold[l1] * d + xold[l] * xold[l1] * cfor
-            wt = abs(cfor) / (abs(cfor) + abs(cback)) if (cfor or cback) else 0.0
-            a = afor + wt * (aback - afor)
-            b = bfor + wt * (bback - bfor)
-            c = cfor + wt * (cback - cfor)
+            bbac = d - (xold1[l1] + xold1[l2]) * cbac
+            abac = fold1[l2] - xold1[l2] * d + xold1[l1] * xold1[l2] * cbac
+            if l == nold:
+                # Label 22
+                c = cbac
+                b = bbac
+                a = abac
+                ll = l
+                fnew[k - 1] = a + (b + c * x) * x
+                continue
         else:
-            a, b, c = aback, bback, cback
+            # Reuse backward coefficients
+            cbac = cfor
+            bbac = bfor
+            abac = afor
+            if l == nold:
+                c = cbac
+                b = bbac
+                a = abac
+                ll = l
+                fnew[k - 1] = a + (b + c * x) * x
+                continue
 
+        # Label 25: forward coefficients
+        d = (fold1[l] - fold1[l1]) / (xold1[l] - xold1[l1])
+        cfor = (
+            fold1[l + 1]
+            / ((xold1[l + 1] - xold1[l]) * (xold1[l + 1] - xold1[l1]))
+            + (
+                fold1[l1] / (xold1[l + 1] - xold1[l1])
+                - fold1[l] / (xold1[l + 1] - xold1[l])
+            )
+            / (xold1[l] - xold1[l1])
+        )
+        bfor = d - (xold1[l] + xold1[l1]) * cfor
+        afor = fold1[l1] - xold1[l1] * d + xold1[l] * xold1[l1] * cfor
+
+        wt = 0.0
+        if abs(cfor) != 0.0:
+            wt = abs(cfor) / (abs(cfor) + abs(cbac))
+        a = afor + wt * (abac - afor)
+        b = bfor + wt * (bbac - bfor)
+        c = cfor + wt * (cbac - cfor)
         ll = l
-        fnew[k] = a + (b + c * x) * x
+        fnew[k - 1] = a + (b + c * x) * x
 
     return fnew

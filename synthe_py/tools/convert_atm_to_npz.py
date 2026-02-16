@@ -452,6 +452,11 @@ def compute_derived_quantities(
 
         print(f"  Using RHOX from .atm directly (first value: {rhox[0]:.6e})")
 
+    # Ensure RHOX is surface -> deep (monotonic increasing)
+    needs_reverse = rhox.size > 1 and rhox[0] > rhox[-1]
+    if needs_reverse:
+        print("  RHOX is decreasing; will reverse all depth arrays to match Fortran ordering")
+
     turbulent_velocity = np.array([l["VTURB"] for l in layers], dtype=np.float64)
 
     # TKEV = T / (k_B in eV/K) = T / 11604.518...
@@ -549,18 +554,16 @@ def compute_derived_quantities(
 
     xnatm_atomic = np.maximum(xnatm_atomic, 1e-30)
 
-    # CRITICAL: If molecules are enabled (IFMOL=1), call NMOLEC to recompute XNATOM
-    # This matches Fortran behavior: when IFMOL=1, POPS calls NMOLEC which sets XNATOM = XN(1)
-    # XN(1) includes molecular contributions, making XNATOM larger than P/TK - XNE
-    # From debug logs: First POPS call (CODE=1.00) triggers NMOLEC when IFMOL=1
-    #
-    # Fortran reference (atlas7v.for NMOLEC call from POPS):
-    #   IF(IFMOL.EQ.1.AND.CODE.EQ.1.)CALL NMOLEC
-    #   XNATOM(J) = XN(1)  ! XN(1) includes molecular contributions
+    # NOTE: The early compute_derived_quantities runs with ifpres=0 because
+    # NMOLEC is properly handled later inside the POPS calls (pops_exact module
+    # with set_ifpres(1) / set_ifmol(1)).  The results from compute_derived_quantities
+    # get overwritten by the XNE-from-.atm block anyway.
+    ifpres = 0
+
     xnatm = xnatm_atomic.copy()  # Default to atomic-only
     electron_density_updated = electron_density_atm.copy()
 
-    if NMOLEC_AVAILABLE and xabund is not None:
+    if ifpres == 1 and NMOLEC_AVAILABLE and xabund is not None:
         # Call NMOLEC to get molecular corrections for XNATOM
         # This is critical for cool stars where molecules lock up hydrogen
         try:
@@ -592,13 +595,16 @@ def compute_derived_quantities(
         except Exception as e:
             print(f"  WARNING: NMOLEC error: {e} - using atomic XNATOM")
             xnatm = xnatm_atomic
-    elif xabund is None:
+    elif ifpres == 1 and xabund is None:
         print(
             "  NOTE: No abundances provided - using atomic XNATOM (NMOLEC requires xabund)"
         )
         xnatm = xnatm_atomic
-    else:
+    elif ifpres == 1:
         print("  NOTE: NMOLEC not available - using atomic XNATOM")
+        xnatm = xnatm_atomic
+    else:
+        print("  NOTE: IFPRES=0 (xnfpelsyn) - skipping NMOLEC, using atomic XNATOM")
         xnatm = xnatm_atomic
 
     # RHO = mass density
@@ -634,6 +640,20 @@ def compute_derived_quantities(
     mass_density = xnatm * WTMOLE_USE * 1.660e-24
 
     electron_density = electron_density_atm.copy()  # Use XNE from .atm file
+
+    if needs_reverse:
+        temperature = temperature[::-1]
+        tkev = tkev[::-1]
+        tk = tk[::-1]
+        hkt = hkt[::-1]
+        tlog = tlog[::-1]
+        hckt = hckt[::-1]
+        gas_pressure = gas_pressure[::-1]
+        electron_density = electron_density[::-1]
+        xnatm = xnatm[::-1]
+        mass_density = mass_density[::-1]
+        rhox = rhox[::-1]
+        turbulent_velocity = turbulent_velocity[::-1]
 
     return {
         "temperature": temperature,
@@ -1855,10 +1875,7 @@ if __name__ == "__main__":
 
         print(f"  Successfully set XNE from .atm file (will be used by POPS)")
         print(
-            f"  NOTE: NMOLEC will be called automatically during first POPS call (matching Fortran)"
-        )
-        print(
-            f"        This will modify XNATOM and XNE in-place to include molecular contributions"
+            f"  NOTE: IFPRES=0, so POPS will NOT call NMOLEC (matching xnfpelsyn)."
         )
 
         # PHYSICS VALIDATION: Verify mass_density calculation
@@ -1969,41 +1986,35 @@ if __name__ == "__main__":
         f"  Loaded {np.count_nonzero(idmol)} molecular codes from {locate_molecules_file()}"
     )
 
-    # NOTE: NMOLEC will be called from within POPS (matching Fortran's behavior)
-    # Fortran only calls NMOLEC once, inside POPS when IFPRES=1 AND ITEMP≠ITEMP1
-    # Do NOT call compute_xnatom_with_molecules here as it would duplicate the NMOLEC call
-    # The results will be captured after the first POPS call which triggers NMOLEC
+    # Fortran xnfpelsyn uses IFPRES=1 (see xnfpelsyn debug log).
+    # That means POPS may call NELECT (IFMOL=0) or NMOLEC (IFMOL=1).
+    # Initialize with .atm values, but allow POPS to update them when IFPRES=1.
     nmolec_xnatm_result = derived["xnatm"].copy()
     nmolec_xne_result = derived["electron_density"].copy()
     nmolec_mass_density_result = derived["mass_density"].copy()
 
     try:
 
-        from synthe_py.tools.pops_exact import pops_exact, set_ifmol
+        from synthe_py.tools.pops_exact import pops_exact, set_ifmol, set_ifpres
+        # Match xnfpelsyn: IFPRES=1 so POPS can call NELECT/NMOLEC.
+        set_ifpres(1)
 
-        # CRITICAL FIX: Use IFMOL from .atm file (parsed from "MOLECULES ON/OFF")
-        # Fortran atlas7v.for lines 1548-1550:
-        #   610 IFMOL=1 (for MOLECULES ON)
-        #   620 IFMOL=0 (for MOLECULES OFF)
-        # When IFMOL=1, NMOLEC is called which computes molecular XNATOM (larger than atomic)
-        # When IFMOL=0, NELECT is called which uses simpler atomic-only formula
-        ifmol_from_atm = atm_data.get("ifmol", None)
-
-        # CRITICAL FIX: Fortran xnfpelsyn/spectrv ALWAYS uses IFMOL=1 for spectrum synthesis
-        # Fortran debug log shows: "IFCORR 0  IFPRES 0  IFSURF 1  IFSCAT 1  IFCONV 1  MIXLTH  1.25  IFMOL 1"
-        # The previous temperature-based auto-detection was WRONG - Fortran uses IFMOL=1 regardless of Teff
-        if ifmol_from_atm is None:
-            ifmol_from_atm = 1  # Always use molecular equilibrium, matching Fortran
-            teff = atm_data.get("teff", 6000.0)
-            print(f"  Using IFMOL=1 for spectrum synthesis (Teff={teff:.0f}K)")
-            print(f"    This matches Fortran xnfpelsyn behavior")
+        # CRITICAL: Fortran's at12tosyn.exe UNCONDITIONALLY adds "MOLECULES ON"
+        # to every model file (src/at12tosyn.f90 lines 23-24):
+        #   WRITE(34,'("READ MOLECULES")')
+        #   WRITE(34,'("MOLECULES ON")')
+        # This sets IFMOL=1 in READIN (atlas7v.for line 1890: 610 IFMOL=1)
+        # for ALL atmospheres, regardless of .atm file content.
+        #
+        # Python reads the RAW .atm file (no at12tosyn step), so "MOLECULES ON"
+        # is absent → ifmol defaults to 0 → NMOLEC never runs → wrong XNATOM
+        # for cool stars.  Fix: always set IFMOL=1, matching at12tosyn behavior.
+        ifmol_from_atm = 1  # Always ON, matching at12tosyn.exe
+        teff = atm_data.get("teff", 6000.0)
+        print(f"  IFMOL=1 (forced, matching Fortran at12tosyn.exe for Teff={teff:.0f}K)")
 
         set_ifmol(ifmol_from_atm)
-        if ifmol_from_atm == 1:
-            print(f"  Using IFMOL=1 for molecular equilibrium")
-            print(f"    NMOLEC will compute XNATOM including molecular contributions")
-        else:
-            print(f"  Using IFMOL=0 for atomic-only equilibrium")
+        print(f"    NMOLEC will compute XNATOM including molecular contributions")
 
         # Fortran data already loaded above for XNE/WTMOLE computation
 
@@ -2084,6 +2095,36 @@ if __name__ == "__main__":
         # kapp.py's HRAYOP compute_ground_state_hydrogen expects mode=12 input
         xnfh_mode12 = np.maximum(xnfh[:, 0], 1e-40)  # mode=12 (NOT /U) for HRAYOP
 
+        # Compute H2 the same way xnfpelsyn does: XNFH2 = XNFH**2 * EQ.
+        xnf_h2 = np.zeros(n_layers, dtype=np.float64)
+        for j in range(n_layers):
+            T = derived["temperature"][j]
+            if T > 9000.0:
+                xnf_h2[j] = 0.0
+                continue
+            TKEV = derived["tkev"][j]
+            TLOG = derived["tlog"][j]
+            eq = np.exp(
+                4.478 / TKEV
+                - 4.64584e1
+                + (
+                    1.63660e-3
+                    + (
+                        -4.93992e-7
+                        + (
+                            1.11822e-10
+                            + (-1.49567e-14 + (1.06206e-18 - 3.08720e-23 * T) * T)
+                            * T
+                        )
+                        * T
+                    )
+                    * T
+                )
+                * T
+                - 1.5 * TLOG
+            )
+            xnf_h2[j] = xnfh_mode12[j] ** 2 * eq
+
         # From xnfpelsyn.for:
         #   Line 253: CALL POPS(2.01D0,12,XNFHE) - for XNFHE (not used by KAPP)
         #   Line 263: CALL POPS(2.02D0,11,XNFPHE) - for XNFPHE (used by KAPP/HERAOP!)
@@ -2143,9 +2184,31 @@ if __name__ == "__main__":
         # Without these, Python continuum is ~5% too high!
         # ==========================================================================
         # From xnfpelsyn.for:
+        #   Line 280: CALL POPS(6.01D0,11,XNFPC)  - C I ground state
         #   Line 288: CALL POPS(12.01D0,11,XNFPMG) - Mg I ground state
         #   Line 298: CALL POPS(14.01D0,11,XNFPSI) - Si I ground state
         #   Line 313: CALL POPS(26.00D0,11,XNFPFE) - Fe I ground state
+
+        # Compute XNFPC (mode=11, code=6.01) - Carbon I for C1OP
+        xnfpc_arr = np.zeros((n_layers, 10), dtype=np.float64)
+        pops_exact(
+            code=6.01,
+            mode=11,
+            number=xnfpc_arr,
+            temperature=temp,
+            tkev=tkev,
+            tk=tk,
+            hkt=hkt,
+            hckt=hckt,
+            tlog=tlog,
+            gas_pressure=gas_pressure,
+            electron_density=xne,
+            xnatom=xnatm,
+            xabund=xabund,
+            departure_tables=departure_tables,
+        )
+        # Store both C I and C II stages to match XNFPC(kw,2) layout
+        xnfpc = np.maximum(xnfpc_arr[:, :2], 1e-40)
 
         # Compute XNFPMG (mode=11, code=12.01) - Magnesium I for MG1OP
         xnfpmg_arr = np.zeros((n_layers, 10), dtype=np.float64)
@@ -2166,6 +2229,26 @@ if __name__ == "__main__":
             departure_tables=departure_tables,
         )
         xnfpmg = np.maximum(xnfpmg_arr[:, 0], 1e-40)  # Mg I ground state
+
+        # Compute XNFPAL (mode=11, code=13.01) - Aluminum I for AL1OP
+        xnfpal_arr = np.zeros((n_layers, 10), dtype=np.float64)
+        pops_exact(
+            code=13.01,
+            mode=11,
+            number=xnfpal_arr,
+            temperature=temp,
+            tkev=tkev,
+            tk=tk,
+            hkt=hkt,
+            hckt=hckt,
+            tlog=tlog,
+            gas_pressure=gas_pressure,
+            electron_density=xne,
+            xnatom=xnatm,
+            xabund=xabund,
+            departure_tables=departure_tables,
+        )
+        xnfpal = np.maximum(xnfpal_arr[:, 0], 1e-40)  # Al I ground state
 
         # Compute XNFPSI (mode=11, code=14.01) - Silicon I for SI1OP
         xnfpsi_arr = np.zeros((n_layers, 10), dtype=np.float64)
@@ -2209,6 +2292,7 @@ if __name__ == "__main__":
 
         print(f"  Computed H/He/Metal populations using exact POPS")
         print(f"    XNFPMG[0] = {xnfpmg[0]:.6e} cm⁻³ (Mg I - 10% of opacity at 300nm)")
+        print(f"    XNFPAL[0] = {xnfpal[0]:.6e} cm⁻³ (Al I - contributes to AL1OP)")
         print(f"    XNFPSI[0] = {xnfpsi[0]:.6e} cm⁻³ (Si I - 1% of opacity at 300nm)")
         print(f"    XNFPFE[0] = {xnfpfe[0]:.6e} cm⁻³ (Fe I - 35% of opacity at 300nm)")
 
@@ -2220,15 +2304,30 @@ if __name__ == "__main__":
 
         print(f"    XNFH2[0] = {xnf_h2_basic[0]:.6e} cm⁻³")
 
-        # Capture NMOLEC results (NMOLEC was called inside pops_exact on first call)
-        # These arrays were modified in-place by NMOLEC
-        nmolec_xnatm_result = xnatm.copy()
-        nmolec_xne_result = xne.copy()
-        nmolec_mass_density_result = nmolec_xnatm_result * wtmole * 1.660e-24
-        nmolec_success = True  # NMOLEC succeeded (called inside pops_exact)
+        # CRITICAL FIX: xnfpelsyn.for sets IFPRES=1 (line 183, overriding 0 at 182).
+        # With IFPRES=1 + IFMOL=1 (cool-star models), the first pops_exact call
+        # invokes NMOLEC inside the POPS module, which modifies `xnatm` IN-PLACE
+        # (atlas7v.for line 5845: XNATOM(J) = XN(1)).
+        # Detect this and propagate the NMOLEC-corrected values back to `derived`.
+        xnatm_changed = not np.allclose(xnatm, derived["xnatm"], rtol=1e-10)
+        if xnatm_changed:
+            nmolec_success = True
+            nmolec_xnatm_result = xnatm.copy()
+            nmolec_xne_result = xne.copy()
+            nmolec_mass_density_result = xnatm * wtmole * 1.660e-24
+            print(f"  ✓ NMOLEC ran inside POPS (IFPRES=1, IFMOL=1)")
+            print(f"    XNATOM[0] changed: {derived['xnatm'][0]:.6e} → {xnatm[0]:.6e} "
+                  f"(ratio: {xnatm[0]/derived['xnatm'][0]:.4f})")
+            print(f"    RHO[0] will change: {derived['mass_density'][0]:.6e} → "
+                  f"{nmolec_mass_density_result[0]:.6e}")
+        else:
+            nmolec_success = False
+            print(f"  NOTE: NMOLEC did not modify XNATOM (either IFMOL=0 or hot star)")
 
-        print(f"    XNE[0] = {xne[0]:.6e} cm⁻³ (from NMOLEC)")
-        print(f"    XNATOM[0] = {xnatm[0]:.6e} cm⁻³ (from NMOLEC)")
+        print(f"    XNE[0] = {xne[0]:.6e} cm⁻³ (from .atm)")
+        if xne.size > 59:
+            print(f"    XNE[59] = {xne[59]:.6e} cm⁻³ (from .atm)")
+        print(f"    XNATOM[0] = {xnatm[0]:.6e} cm⁻³ (after POPS/NMOLEC)")
 
     except (FileNotFoundError, ImportError) as e:
 
@@ -2257,6 +2356,18 @@ if __name__ == "__main__":
     xne_computed = xne.copy()
     xnatm_computed = xnatm.copy()
 
+    # CRITICAL FIX: Apply NELECT/NMOLEC corrections to derived dict BEFORE computing
+    # continuum.  Fortran's xnfpelsyn calls KAPP *after* NELECT has updated XNATOM
+    # and RHO in the COMMON block, so the continuum opacity is normalised by the
+    # NELECT-converged mass density.  Previously, Python computed the continuum with
+    # the old (atomic) mass_density, introducing a ~6 % bias for cool stars.
+    if nmolec_success:
+        derived["xnatm"] = nmolec_xnatm_result.copy()
+        derived["mass_density"] = nmolec_mass_density_result.copy()
+        print(f"  Applied NELECT/NMOLEC corrections before continuum computation:")
+        print(f"    XNATOM[0] = {derived['xnatm'][0]:.6e}")
+        print(f"    RHO[0]    = {derived['mass_density'][0]:.6e}")
+
     # Compute continuum
     # args.atlas_tables is now guaranteed to exist (validated above)
     print(f"  Using atlas_tables: {args.atlas_tables}")
@@ -2273,10 +2384,12 @@ if __name__ == "__main__":
             xnfph_h=xnf_h_basic,  # mode=11 for HOP
             xnf_he1=xnfhe1_mode12,  # mode=12 for HERAOP
             xnf_he2=xnfhe2_mode12,  # mode=12 for HERAOP
-            xnf_h2=xnf_h2_basic,  # Molecular H2 (for storage in NPZ)
+            xnf_h2=xnf_h2,  # Molecular H2 (for storage in NPZ)
             xnf_h_ion=xnf_h2_basic,  # CRITICAL: H II (ionized H) for H2PLOP
             # CRITICAL: Metal populations for UV bound-free opacities
+            xnfpc=xnfpc,  # C I for C1OP
             xnfpmg=xnfpmg,  # Mg I for MG1OP (10% of opacity at 300nm)
+            xnfpal=xnfpal,  # Al I for AL1OP
             xnfpsi=xnfpsi,  # Si I for SI1OP (1% of opacity at 300nm)
             xnfpfe=xnfpfe,  # Fe I for FE1OP (35% of opacity at 300nm!)
         )
@@ -2473,7 +2586,10 @@ if __name__ == "__main__":
     doppler = None
 
     try:
-        from synthe_py.tools.pops_exact import pops_exact, compute_doppler_exact
+        from synthe_py.tools.pops_exact import (
+            pops_exact,
+            compute_doppler_exact,
+        )
 
         # Compute populations for all elements
         n_layers = len(atm_data["layers"])
@@ -2531,6 +2647,16 @@ if __name__ == "__main__":
             # Elements 29+ use .02 (from DO loop in xnfpelsyn.for line 470)
             return code_map.get(elem_num, float(elem_num) + 0.02)
 
+        # Use NMOLEC-updated XNATOM for POPS (matches xnfpelsyn behavior)
+        # XNE should remain the .atm value; POPS may update it in-place, so use a copy.
+        if nmolec_success and nmolec_xnatm_result is not None:
+            xnatm_for_pops = nmolec_xnatm_result.copy()
+        else:
+            xnatm_for_pops = derived["xnatm"].copy()
+        # Fortran POPS uses XNE from the .atm file (xnfpelsyn.for reads XNE from fort.5),
+        # even when NMOLEC runs. Using NMOLEC XNE here over-ionizes Na/K and weakens lines.
+        xne_for_pops = derived["electron_density"].copy()
+
         for elem_num in range(1, 100):  # Elements 1-99
             if elem_num % 10 == 0:
                 print(f"    Processing element {elem_num}/99...")
@@ -2555,8 +2681,8 @@ if __name__ == "__main__":
                     derived["hckt"],
                     derived["tlog"],
                     derived["gas_pressure"],
-                    derived["electron_density"],
-                    derived["xnatm"],
+                    xne_for_pops,
+                    xnatm_for_pops,
                     xabund,
                     departure_tables=departure_tables,
                 )
@@ -2632,7 +2758,9 @@ if __name__ == "__main__":
         raise RuntimeError("Population computation failed") from e
 
     if nmolec_success:
-        # Update derived["xnatm"] with NMOLEC result
+        # Ensure derived dict has the NELECT/NMOLEC-corrected values.
+        # (They were already applied before continuum computation above,
+        #  but repeat here for safety in case the block order is changed.)
         derived["xnatm"] = nmolec_xnatm_result.copy()
         # CRITICAL: Do NOT overwrite XNE from .atm file!
         # The .atm file XNE was computed by Fortran's ATLAS/NMOLEC and is correct.
@@ -2640,7 +2768,7 @@ if __name__ == "__main__":
         # Keep the original .atm XNE for accurate continuum opacities.
         # derived["electron_density"] = nmolec_xne_result.copy()  # DISABLED
         derived["mass_density"] = nmolec_mass_density_result.copy()
-        print("  Applied deferred NMOLEC corrections after POPS completion.")
+        print("  Confirmed NELECT/NMOLEC corrections in derived dict.")
         print(
             f"    XNE[0] = {derived['electron_density'][0]:.6e} cm⁻³ (kept from .atm, NOT overwritten)"
         )
@@ -2664,7 +2792,7 @@ if __name__ == "__main__":
             xnf_h_basic_exists = False
 
         if xnf_h_basic_exists:
-            print("    Continuum will be recomputed AFTER H2 equilibrium correction...")
+            print("    H2 equilibrium will be computed before interpolation.")
 
         # All computation is done from .atm file
         # NOTE: Interpolation coefficients will be computed AFTER H2 equilibrium correction
@@ -2678,164 +2806,6 @@ if __name__ == "__main__":
         ]  # Element 1 (H), ion 1 - mode=11 (will be overwritten below)
         xnf_he1 = population[:, 0, 1]  # Element 2 (He), ion 1
         xnf_he2 = population[:, 1, 1]  # Element 2 (He), ion 2
-
-        # CRITICAL FIX: Compute XNF_H using the SAME method as Fortran
-        # Fortran flow:
-        #   1. NMOLEC updates XNATOM to include molecular equilibrium
-        #   2. POPS computes XNFH = Saha_fraction * XNATOM * XABUND
-        #   3. xnfpelsyn.for computes XNFH2 = XNFH^2 * K
-        #
-        # The key insight is that XNFH + 2*XNFH2 = XNATOM * XABUND (atom conservation)
-        # So XNFH is the quadratic solution for atomic hydrogen.
-        #
-        # For Python: use total_H = XNATOM_NMOLEC * XABUND, then solve quadratic
-        # DO NOT scale xnfh_mode12 by xnatom_ratio!
-
-        xabund_h = 0.92123  # Hydrogen mass fraction
-
-        xnf_h2 = np.zeros(n_layers, dtype=np.float64)
-        xnfh_final = np.zeros(n_layers, dtype=np.float64)
-
-        for j in range(n_layers):
-            T = derived["temperature"][j]
-            # Total hydrogen = XNATOM * XABUND (using NMOLEC-updated XNATOM)
-            total_h = derived["xnatm"][j] * xabund_h
-
-            if T > 9000.0:
-                # No H2 at high T, all H is atomic
-                xnfh_final[j] = total_h
-                xnf_h2[j] = 0.0
-            else:
-                TKEV = derived["tkev"][j]
-                TLOG = derived["tlog"][j]
-                # Equilibrium constant K from xnfpelsyn.for (lines 352-355)
-                K = np.exp(
-                    4.478 / TKEV
-                    - 4.64584e1
-                    + (
-                        1.63660e-3
-                        + (
-                            -4.93992e-7
-                            + (
-                                1.11822e-10
-                                + (-1.49567e-14 + (1.06206e-18 - 3.08720e-23 * T) * T)
-                                * T
-                            )
-                            * T
-                        )
-                        * T
-                    )
-                    * T
-                    - 1.5 * TLOG
-                )
-
-                # Solve quadratic for atomic H: 2*K*n_H^2 + n_H - total_H = 0
-                # n_H = (-1 + sqrt(1 + 8*K*total_H)) / (4*K)
-                if K > 1e-40:
-                    discriminant = 1.0 + 8.0 * K * total_h
-                    n_H = (-1.0 + np.sqrt(discriminant)) / (4.0 * K)
-                    xnfh_final[j] = n_H
-                    xnf_h2[j] = n_H**2 * K
-                else:
-                    # K too small, no H2 formation
-                    xnfh_final[j] = total_h
-                    xnf_h2[j] = 0.0
-
-        # Replace xnfh_mode12 with the corrected values
-        xnfh_mode12 = xnfh_final
-
-        # CRITICAL FIX: Update population_per_ion[H I] to use H2-corrected atomic H
-        # The population array was computed BEFORE H2 equilibrium, using XNATOM * XABUND
-        # But HMINOP and other opacity sources need the actual atomic H population
-        # which is LOWER due to H2 formation in cool atmospheres
-        #
-        # population[:, 0, 0] = H I ground state population = atomic_H / U
-        # where U ≈ 2.0 at T < 9000K
-        old_pop_h1 = population[:, 0, 0].copy()
-        population[:, 0, 0] = xnfh_final / 2.0  # Ground state H = atomic H / U
-        print(f"  Updated population[H I] after H2 equilibrium:")
-        print(f"    Before: {old_pop_h1[0]:.6E} (from XNATOM*XABUND)")
-        print(f"    After:  {population[0, 0, 0]:.6E} (H2-corrected)")
-        print(f"    Ratio:  {population[0, 0, 0]/old_pop_h1[0]:.4f}")
-
-        print("  Computed XNFH, XNFHE, XNFH2 from populations")
-        print(
-            f"    H2 equilibrium applied: XNF_H[0] = {xnfh_mode12[0]:.6E}, XNF_H2[0] = {xnf_h2[0]:.6E}"
-        )
-        # Verify atom conservation
-        total_h_check = xnfh_mode12[0] + 2 * xnf_h2[0]
-        expected_h = derived["xnatm"][0] * 0.92123
-        print(
-            f"    Atom conservation: n_H + 2*n_H2 = {total_h_check:.6E}, expected = {expected_h:.6E}"
-        )
-
-        # CRITICAL: Recompute continuum with DIFFERENT populations for HMINOP vs HRAYOP
-        #
-        # Analysis shows:
-        # - HMINOP (ACONT) should use H2-corrected atomic H (xnfh_mode12)
-        # - HRAYOP (SIGMAC) should use total neutral H (XNATOM * XABUND)
-        #
-        # In kapp.py:
-        # - HMINOP uses atmosphere.xnfph[:, 0] for XHMIN calculation
-        # - HRAYOP uses atmosphere.xnf_h for compute_ground_state_hydrogen
-        #
-        # So we pass:
-        # - xnf_h = total neutral H (for HRAYOP)
-        # - xnfph_h = H2-corrected / U (for HMINOP)
-        try:
-            can_recompute = use_atlas_tables and args.atlas_tables is not None
-        except NameError:
-            can_recompute = False
-
-        if can_recompute:
-            print("  Recomputing continuum with H2-corrected populations...")
-
-            U = 2.0  # At low T, U ≈ 2.0
-
-            # KEY INSIGHT from analysis of Fortran-derived NPZ:
-            # When accounting for SIGH2 (H2 molecular scattering), the Fortran
-            # stored SIGMAC matches using xnf_h (H2-corrected), NOT total_neutral_h!
-            #
-            # Both HRAYOP and HMINOP should use the H2-corrected values:
-            # - HRAYOP: xnf_h (H2-corrected atomic H)
-            # - HMINOP: xnf_h / U (ground state H)
-
-            # For HRAYOP (SIGMAC) and HMINOP (ACONT): use H2-corrected atomic H
-            xnfph_h2corrected = xnfh_mode12 / U
-
-            print(f"    HRAYOP will use H2-corrected H: {xnfh_mode12[0]:.6E}")
-            print(f"    HMINOP will use H2-corrected/U: {xnfph_h2corrected[0]:.6E}")
-
-            # Metal opacities (MG1OP, SI1OP, FE1OP) are now implemented in kapp.py
-            # These contribute ~46% of UV continuum opacity at 300nm!
-
-            atmosphere_h2corr = create_atmosphere_model(
-                atm_data,
-                derived,
-                args.atlas_tables,
-                xnf_h=xnfh_mode12,  # mode=12 for HRAYOP (H2-corrected)
-                xnfph_h=xnfph_h2corrected,  # mode=11 for HMINOP (H2-corrected/U)
-                xnf_he1=xnfhe1_mode12,
-                xnf_he2=xnfhe2_mode12,
-                xnf_h2=xnf_h2,  # Molecular H2 (for storage in NPZ)
-                xnf_h_ion=xnf_h2_basic,  # CRITICAL: H II (ionized H) for H2PLOP
-                # CRITICAL: Include metal populations for UV opacities!
-                xnfpmg=xnfpmg,  # Mg I for MG1OP (10% of opacity at 300nm)
-                xnfpsi=xnfpsi,  # Si I for SI1OP (1% of opacity at 300nm)
-                xnfpfe=xnfpfe,  # Fe I for FE1OP (35% of opacity at 300nm!)
-            )
-            # Use IFOP from .atm file to match Fortran xnfpelsyn behavior
-            ifop_from_atm = atm_data.get("ifop", None)
-            cont_abs_log, cont_scat_log = compute_continuum_from_atm(
-                atmosphere_h2corr, freqset, ifop=ifop_from_atm
-            )
-            print(f"    Recomputed continuum with H2-corrected populations:")
-            print(
-                f"      ACONT[0] range [{cont_abs_log[0].min():.4f}, {cont_abs_log[0].max():.4f}]"
-            )
-            print(
-                f"      SIGMAC[0] range [{cont_scat_log[0].min():.4f}, {cont_scat_log[0].max():.4f}]"
-            )
 
     # Compute interpolation coefficients AFTER H2 equilibrium correction
     print("Computing interpolation coefficients...")
@@ -2904,9 +2874,14 @@ if __name__ == "__main__":
         "xnf_he1": xnfhe1_mode12,  # mode=12 for He I
         "xnf_he2": xnfhe2_mode12,  # mode=12 for He II
         "xnf_h2": xnf_h2,
+        "xnf_h_ion": (
+            xnf_h2_basic if xnf_h2_basic is not None else np.zeros_like(xnfh_mode12)
+        ),
         # CRITICAL: Metal populations for UV bound-free opacities
         # These contribute ~46% of opacity at 300nm!
+        "xnfpc": xnfpc,  # C I ground state for C1OP
         "xnfpmg": xnfpmg,  # Mg I ground state for MG1OP (10% at 300nm)
+        "xnfpal": xnfpal,  # Al I ground state for AL1OP
         "xnfpsi": xnfpsi,  # Si I ground state for SI1OP (1% at 300nm)
         "xnfpfe": xnfpfe,  # Fe I ground state for FE1OP (35% at 300nm!)
         "cont_abs": cont_abs_log,  # Keep as log10 (matching Fortran fort.10 format)

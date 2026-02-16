@@ -1,16 +1,19 @@
 #!/usr/bin/env python3
 """Compare Python and Fortran spectra and compute statistics."""
 
-import numpy as np
+import argparse
 from pathlib import Path
 import sys
+from typing import cast
+
+import numpy as np
 
 
 def load_spectrum(filepath: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Load spectrum file with wavelength, flux, continuum columns."""
-    wavelengths = []
-    fluxes = []
-    continua = []
+    wavelengths: list[float] = []
+    fluxes: list[float] = []
+    continua: list[float] = []
 
     with open(filepath, "r") as f:
         for line in f:
@@ -29,7 +32,12 @@ def load_spectrum(filepath: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     return np.array(wavelengths), np.array(fluxes), np.array(continua)
 
 
-def compare_spectra(python_file: Path, fortran_file: Path, wl_range: tuple = None):
+def compare_spectra(
+    python_file: Path,
+    fortran_file: Path,
+    wl_range: tuple[float, float] | None = None,
+    top_n: int | None = None,
+):
     """Compare two spectra and print statistics."""
 
     print(f"Loading Python spectrum: {python_file}")
@@ -116,6 +124,23 @@ def compare_spectra(python_file: Path, fortran_file: Path, wl_range: tuple = Non
     print(f"Sub-percent accuracy: Continuum {cont_status}  Flux {flux_status}")
     print("=" * 60)
 
+    if top_n and top_n > 0:
+        abs_frac = np.abs(flux_rel)
+        order = np.argsort(abs_frac)[::-1]
+        print("\nTop |fractional| flux outliers:")
+        for rank, idx in enumerate(order[:top_n], start=1):
+            if idx >= len(py_wl_common):
+                continue
+            wl_val = py_wl_common[idx]
+            frac_val = (py_flux_common[idx] - ft_flux_interp[idx]) / max(
+                ft_flux_interp[idx], 1e-30
+            )
+            msg = (
+                f"{rank:2d} wl={wl_val:.6f} frac={frac_val:+.3f} "
+                + f"py={py_flux_common[idx]:.3e} ft={ft_flux_interp[idx]:.3e}"
+            )
+            print(msg)
+
     return {
         "flux_mean_rel": np.mean(flux_rel),
         "flux_median_rel": np.median(flux_rel),
@@ -128,12 +153,36 @@ def compare_spectra(python_file: Path, fortran_file: Path, wl_range: tuple = Non
 
 
 if __name__ == "__main__":
-    python_file = Path("synthe_py/out/test_fixed_3750.spec")
-    fortran_file = Path("grids/at12_aaaaa/spec/at12_aaaaa_t03750g3.50.spec")
+    parser = argparse.ArgumentParser(
+        description="Compare Python and Fortran spectra and compute statistics."
+    )
+    _ = parser.add_argument(
+        "python_file",
+        nargs="?",
+        default="synthe_py/out/at12_aaaaa_t02500g-1.0_300_1800_tfort.spec",
+    )
+    _ = parser.add_argument(
+        "fortran_file",
+        nargs="?",
+        default="grids/at12_aaaaa/spec/at12_aaaaa_t02500g-1.0.spec",
+    )
+    _ = parser.add_argument(
+        "--range",
+        nargs=2,
+        type=float,
+        metavar=("WL_MIN", "WL_MAX"),
+        help="Restrict comparison to wavelength range (nm).",
+    )
+    _ = parser.add_argument(
+        "--top",
+        type=int,
+        default=0,
+        help="Print top N fractional flux outliers.",
+    )
+    args = parser.parse_args()
 
-    if len(sys.argv) > 2:
-        python_file = Path(sys.argv[1])
-        fortran_file = Path(sys.argv[2])
+    python_file = Path(cast(str, args.python_file))
+    fortran_file = Path(cast(str, args.fortran_file))
 
     if not python_file.exists():
         print(f"Error: Python spectrum not found: {python_file}")
@@ -142,4 +191,12 @@ if __name__ == "__main__":
         print(f"Error: Fortran spectrum not found: {fortran_file}")
         sys.exit(1)
 
-    compare_spectra(python_file, fortran_file)
+    args_range = cast(list[float] | None, args.range)
+    wl_range = (float(args_range[0]), float(args_range[1])) if args_range else None
+    top_val = int(cast(int, args.top)) if args.top is not None else None
+    _ = compare_spectra(
+        python_file,
+        fortran_file,
+        wl_range=wl_range,
+        top_n=top_val,
+    )

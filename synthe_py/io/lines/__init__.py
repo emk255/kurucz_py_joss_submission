@@ -2,7 +2,15 @@
 
 from typing import Any
 
-__all__ = ["atomic", "molecular", "fort9", "fort19"]
+__all__ = [
+    "atomic",
+    "molecular",
+    "fort9",
+    "fort19",
+    "compiler",
+    "parsed_cache",
+    "tfort_write",
+]
 
 
 def __getattr__(name: str) -> Any:  # pragma: no cover - thin lazy loader

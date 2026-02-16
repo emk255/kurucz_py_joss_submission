@@ -5920,6 +5920,12 @@ def compute_kapp_continuum(
 
     rho = np.maximum(np.asarray(atmosphere.mass_density, dtype=np.float64), 1e-30)
 
+    # Define xne at function scope (Fortran has it in COMMON, always accessible)
+    if atmosphere.electron_density is not None:
+        xne = np.asarray(atmosphere.electron_density, dtype=np.float64)
+    else:
+        xne = np.zeros(n_layers, dtype=np.float64)
+
     # DEBUG: Print mass density values
     if _TRACE_KAPP and logger.level <= logging.INFO:
         print(f"\n  DEBUG KAPP: Mass density (RHO) values:")
@@ -6208,7 +6214,7 @@ def compute_kapp_continuum(
             shyd[:, j] = np.where(h > 0, s / h, bnu_j)
 
     # H2PLOP: H2+ opacity (atlas7v.for line 5189-5211)
-    if atmosphere.xnfph is not None and freq.max() <= 3.28805e15:
+    if atmosphere.xnfph is not None:
         logger.info("Computing H2PLOP (H2+ opacity)...")
         xnfph_arr = np.asarray(atmosphere.xnfph, dtype=np.float64)
         bhyd = atlas_tables.get("bhyd", np.ones((n_layers, 8), dtype=np.float64))
@@ -6216,6 +6222,8 @@ def compute_kapp_continuum(
 
         for j in range(nfreq):
             f = freq[j]
+            if f > 3.28805e15:
+                continue
             wno = waveno[j]
             freqlg = np.log(f)
             freq15 = f / 1.0e15
@@ -6909,7 +6917,15 @@ def compute_kapp_continuum(
         tkev = temp * KBOLTZ_EV
 
         # Pre-compute XHMIN (atlas7v.for line 5298-5299) - per layer, not per frequency
-        xnfph1 = xnfph_arr[:, 0] if xnfph_arr.shape[1] > 0 else np.ones(n_layers)
+        # Fortran uses XNFPH(J,1) from POPS (mode=11). Prefer the explicit XNFPH array.
+        if xnfph_arr.shape[1] > 0:
+            xnfph1 = xnfph_arr[:, 0]
+        elif atmosphere.xnf_h is not None:
+            xnfph1 = compute_ground_state_hydrogen(
+                np.asarray(atmosphere.xnf_h, dtype=np.float64), temp
+            )
+        else:
+            xnfph1 = np.ones(n_layers)
         bhyd1 = bhyd[:, 0] if bhyd.shape[1] > 0 else np.ones(n_layers)
         xhmin = (
             np.exp(0.754209 / tkev)
@@ -6933,10 +6949,11 @@ def compute_kapp_continuum(
         ff_full = np.zeros((nthetaff, 22), dtype=np.float64)
         for it in range(nthetaff):
             for iw in range(22):
+                # Fortran tables are column-major; index as [iw, it] to match.
                 if iw < 11:
-                    ff_full[it, iw] = HMINOP_FFBEG[it, iw]
+                    ff_full[it, iw] = HMINOP_FFBEG[iw, it]
                 else:
-                    ff_full[it, iw] = HMINOP_FFEND[it, iw - 11]
+                    ff_full[it, iw] = HMINOP_FFEND[iw - 11, it]
 
         # Pre-compute FFLOG = log(FF/THETAFF * 5040 * K_BOLTZ)
         fflog = np.zeros((22, nthetaff), dtype=np.float64)
@@ -6989,6 +7006,32 @@ def compute_kapp_continuum(
             )
 
             ahmin[:, j] = h_bf + hminff
+
+            debug_hminop_wave = os.environ.get("PY_DEBUG_HMINOP_WAVE")
+            debug_hminop_depth = os.environ.get("PY_DEBUG_HMINOP_DEPTH")
+            if debug_hminop_wave and debug_hminop_depth:
+                try:
+                    wave_val = float(debug_hminop_wave)
+                    depth_idx = max(0, int(debug_hminop_depth) - 1)
+                except ValueError:
+                    wave_val = None
+                    depth_idx = None
+                if (
+                    wave_val is not None
+                    and depth_idx is not None
+                    and depth_idx < n_layers
+                    and abs(wave - wave_val) < 1e-3
+                ):
+                    print(
+                        "PY_DEBUG_HMINOP: "
+                        f"wave={wave:.6f} depth={depth_idx + 1} "
+                        f"XNFPH1={xnfph1[depth_idx]:.6e} "
+                        f"XNE={xne[depth_idx]:.6e} RHO={rho[depth_idx]:.6e} "
+                        f"XHMIN={xhmin[depth_idx]:.6e} "
+                        f"FFTHETA={fftheta[depth_idx]:.6e} "
+                        f"HMINBF={hminbf:.6e} HMINFF={hminff[depth_idx]:.6e} "
+                        f"H(BF)={h_bf[depth_idx]:.6e} AHMIN={ahmin[depth_idx, j]:.6e}"
+                    )
 
             # Source function (atlas7v.for line 5313-5314)
             # SHMIN = (H * BNU(J) * STIM(J) / (BMIN(J) - EHVKT(J)) + HMINFF * BNU(J)) / AHMIN(J)
@@ -7200,9 +7243,11 @@ def compute_kapp_continuum(
         logger.info("Computing H2RAOP (H2 Rayleigh scattering)...")
         bhyd1 = bhyd[:, 0] if bhyd.shape[1] > 0 else np.ones(n_layers)
 
-        # Compute XNH2 (H2 number density) from XNFPH using equilibrium
-        # Formula from atlas7v.for lines 6841-6844:
-        # XNH2 = (XNFPH*2*BHYD)^2 * exp(4.478/TKEV - 46.4584 + poly(T) - 1.5*TLOG) / RHO
+        # Compute XNH2 (H2 number density per gram) from XNFPH using equilibrium
+        # Formula from atlas7v.for H2RAOP subroutine (lines 9744-9747):
+        # XNH2(J) = (XNFPH(J,1)*2.*BHYD(J,1))**2 * EXP(4.478D0/TKEV(J) -
+        #   4.64584D1 + poly(T) - 1.5*TLOG(J)) / RHO(J)
+        # The /RHO(J) is outside the EXP() on line 9747 continuation line 3.
         tkev_arr = KBOLTZ_EV * temp
         tlog_arr = np.log(temp)
 
@@ -7221,7 +7266,7 @@ def compute_kapp_continuum(
             * temp
         ) * temp
 
-        exp_term = 4.478 / tkev_arr - 46.4584 + poly_T - 1.5 * tlog_arr
+        exp_term = 4.478 / tkev_arr - 4.64584e1 + poly_T - 1.5 * tlog_arr
 
         # Avoid overflow
         exp_term = np.clip(exp_term, -100, 100)
@@ -8252,35 +8297,84 @@ def compute_kapp_continuum(
 
     # Sum ACONT (atlas7v.for line 4571-4573)
     # a_base includes ALUKE, AHOT (if enabled)
-    # acool_mol includes CH, OH, H2 collision-induced (if populations available)
-    a_base = ah2p + ahemin + aluke + ahot + acool_mol
+    # Fortran KAPP (atlas7v.for line 6280) does NOT include ACOOL in ACONT.
+    a_base = ah2p + ahemin + aluke + ahot
     acont = (
         a_base + ahyd + ahmin + axcont + ahe1 + ahe2 + ac1 + amg1 + aal1 + asi1 + afe1
     )
 
-    # DEBUG: Print individual ACONT components for first frequency to identify huge values
+    debug_wave = os.environ.get("PY_DEBUG_KAPP_WAVE")
+    debug_depth = os.environ.get("PY_DEBUG_KAPP_DEPTH")
+    if debug_wave and debug_depth:
+        try:
+            wave_val = float(debug_wave)
+            depth_idx = max(0, int(debug_depth) - 1)
+        except ValueError:
+            wave_val = None
+            depth_idx = None
+        if wave_val is not None and depth_idx is not None and depth_idx < n_layers:
+            wl_idx = int(np.argmin(np.abs(wavelength_nm - wave_val)))
+            if abs(wavelength_nm[wl_idx] - wave_val) < 1e-3:
+                sigmac_val = (
+                    sigh[depth_idx, wl_idx]
+                    + sighe[depth_idx, wl_idx]
+                    + sigel[depth_idx, wl_idx]
+                    + sigh2[depth_idx, wl_idx]
+                    + sigx[depth_idx, wl_idx]
+                )
+                xnfph1_debug = None
+                if atmosphere.xnfph is not None:
+                    xnfph_arr = np.asarray(atmosphere.xnfph, dtype=np.float64)
+                    if xnfph_arr.ndim > 1 and xnfph_arr.shape[1] > 0:
+                        xnfph1_debug = xnfph_arr[depth_idx, 0]
+                if xnfph1_debug is None and atmosphere.xnf_h is not None:
+                    xnfph1_debug = compute_ground_state_hydrogen(
+                        np.asarray(atmosphere.xnf_h, dtype=np.float64), temp
+                    )[depth_idx]
+                xne_debug = (
+                    atmosphere.electron_density[depth_idx]
+                    if atmosphere.electron_density is not None
+                    else np.nan
+                )
+                rho_debug = rho[depth_idx] if rho is not None else np.nan
+                bmin_debug = bmin[depth_idx] if bmin is not None else np.nan
+                bhyd1_debug = (
+                    bhyd[depth_idx, 0] if bhyd is not None and bhyd.shape[1] > 0 else np.nan
+                )
+                print(
+                    "PY_DEBUG_KAPP: "
+                    f"wave={wavelength_nm[wl_idx]:.6f} depth={depth_idx + 1} "
+                    f"A(misc)={a_base[depth_idx, wl_idx]:.6e} "
+                    f"AHYD={ahyd[depth_idx, wl_idx]:.6e} "
+                    f"AHMIN={ahmin[depth_idx, wl_idx]:.6e} "
+                    f"AXCONT={axcont[depth_idx, wl_idx]:.6e} "
+                    f"AHE1={ahe1[depth_idx, wl_idx]:.6e} "
+                    f"AHE2={ahe2[depth_idx, wl_idx]:.6e} "
+                    f"AC1={ac1[depth_idx, wl_idx]:.6e} "
+                    f"AMG1={amg1[depth_idx, wl_idx]:.6e} "
+                    f"AAL1={aal1[depth_idx, wl_idx]:.6e} "
+                    f"ASI1={asi1[depth_idx, wl_idx]:.6e} "
+                    f"AFE1={afe1[depth_idx, wl_idx]:.6e} "
+                    f"ACONT={acont[depth_idx, wl_idx]:.6e} "
+                    f"SIGMAC={sigmac_val:.6e} "
+                    f"XNFPH1={xnfph1_debug:.6e} XNE={xne_debug:.6e} "
+                    f"RHO={rho_debug:.6e} BMIN={bmin_debug:.6e} BHYD1={bhyd1_debug:.6e}"
+                )
+
+    # DEBUG: Print ACONT components across 300-325 nm (layer 0)
     if _TRACE_KAPP and nfreq > 0:
-        j = 0  # First frequency
         print(f"\n{'='*80}")
-        print(
-            f"DEBUG ACONT COMPONENTS (first frequency, ~{C_LIGHT_NM/freq[0]:.2f} nm, layer 0):"
-        )
-        print(f"  AH2P[0] = {ah2p[0, j]:.8E} cm²/g")
-        print(f"  AHEMIN[0] = {ahemin[0, j]:.8E} cm²/g")
-        print(f"  ALUKE[0] = {aluke[0, j]:.8E} cm²/g")
-        print(f"  AHOT[0] = {ahot[0, j]:.8E} cm²/g")
-        print(f"  A_BASE[0] = {a_base[0, j]:.8E} cm²/g")
-        print(f"  AHYD[0] = {ahyd[0, j]:.8E} cm²/g")
-        print(f"  AHMIN[0] = {ahmin[0, j]:.8E} cm²/g")
-        print(f"  AXCONT[0] = {axcont[0, j]:.8E} cm²/g")
-        print(f"  AHE1[0] = {ahe1[0, j]:.8E} cm²/g")
-        print(f"  AHE2[0] = {ahe2[0, j]:.8E} cm²/g")
-        print(f"  AC1[0] = {ac1[0, j]:.8E} cm²/g")
-        print(f"  AMG1[0] = {amg1[0, j]:.8E} cm²/g")
-        print(f"  AAL1[0] = {aal1[0, j]:.8E} cm²/g")
-        print(f"  ASI1[0] = {asi1[0, j]:.8E} cm²/g")
-        print(f"  AFE1[0] = {afe1[0, j]:.8E} cm²/g")
-        print(f"  ACONT[0] = {acont[0, j]:.8E} cm²/g")
+        print("DEBUG ACONT COMPONENTS (300-325 nm, layer 0):")
+        for j in range(nfreq):
+            wl_val = wavelength_nm[j]
+            if wl_val < 300.0 or wl_val > 325.0:
+                continue
+            print(f"  WL={wl_val:10.4f} nm")
+            print(f"    A(misc)={a_base[0, j]:.8E} AHYD={ahyd[0, j]:.8E} AHMIN={ahmin[0, j]:.8E}")
+            print(f"    AXCONT={axcont[0, j]:.8E} AHE1={ahe1[0, j]:.8E} AHE2={ahe2[0, j]:.8E}")
+            print(f"    AC1={ac1[0, j]:.8E} AMG1={amg1[0, j]:.8E} AAL1={aal1[0, j]:.8E}")
+            print(f"    ASI1={asi1[0, j]:.8E} AFE1={afe1[0, j]:.8E}")
+            print(f"    ACONT={acont[0, j]:.8E} cm²/g")
         print(f"{'='*80}")
 
     # Compute SCONT (atlas7v.for line 4575-4579)

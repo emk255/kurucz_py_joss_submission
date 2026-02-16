@@ -33,6 +33,7 @@ def voigt_profile(v: np.ndarray | float, a: np.ndarray | float) -> np.ndarray | 
             if abs(vi) > 10.0:
                 result[idx] = 0.5642 * ai / (vi ** 2)
             else:
+                # Fortran VOIGT line 1711: (H2TAB*A + H1TAB)*A + H0TAB
                 result[idx] = (
                     (voigt_tables.h2tab[iv] * ai + voigt_tables.h1tab[iv]) * ai
                     + voigt_tables.h0tab[iv]

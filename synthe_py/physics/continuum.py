@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import numpy as np
 
 from typing import TYPE_CHECKING, Optional
@@ -82,8 +83,8 @@ def build_depth_continuum(
     """
 
     tables = atmosphere.continuum_tables
-    coeff_abs = getattr(atmosphere, "cont_absorption", None)
-    coeff_scat = getattr(atmosphere, "cont_scattering", None)
+    coeff_abs = getattr(atmosphere, "continuum_abs_coeff", None)
+    coeff_scat = getattr(atmosphere, "continuum_scat_coeff", None)
 
     wl = np.asarray(wavelength_grid, dtype=np.float64)
 
@@ -149,6 +150,21 @@ def build_depth_continuum(
         # Pre-allocate output arrays
         absorption = np.zeros((n_layers, n_wl), dtype=np.float64)
         scattering = np.zeros((n_layers, n_wl), dtype=np.float64)
+
+        debug_wave = os.environ.get("PY_DEBUG_CONT_WAVE")
+        debug_depth = os.environ.get("PY_DEBUG_CONT_DEPTH")
+        debug_wave_val = None
+        debug_depth_idx = None
+        if debug_wave:
+            try:
+                debug_wave_val = float(debug_wave)
+            except ValueError:
+                debug_wave_val = None
+        if debug_depth:
+            try:
+                debug_depth_idx = max(0, int(debug_depth) - 1)
+            except ValueError:
+                debug_depth_idx = None
 
         # Process each unique edge index
         for edge_idx in range(wledge_abs.size - 1):
@@ -255,6 +271,28 @@ def build_depth_continuum(
                 + s2[:, np.newaxis] * c2[np.newaxis, :]
                 + s3[:, np.newaxis] * c3[np.newaxis, :]
             )
+
+            if (
+                debug_wave_val is not None
+                and debug_depth_idx is not None
+                and debug_depth_idx < n_layers
+                and np.any(mask)
+            ):
+                wl_idx_local = int(np.argmin(np.abs(wl_mask - debug_wave_val)))
+                if abs(wl_mask[wl_idx_local] - debug_wave_val) < 1e-3:
+                    log_abs_val = float(log_abs[debug_depth_idx, wl_idx_local])
+                    log_scat_val = float(log_scat[debug_depth_idx, wl_idx_local])
+                    print(
+                        "PY_DEBUG_CONTCOEF: "
+                        f"wave={wl_mask[wl_idx_local]:.6f} depth={debug_depth_idx + 1} "
+                        f"edge={edge_idx + 1} c1={float(c1[wl_idx_local]):.6e} "
+                        f"c2={float(c2[wl_idx_local]):.6e} c3={float(c3[wl_idx_local]):.6e} "
+                        f"abs1={float(a1[debug_depth_idx]):.6e} "
+                        f"abs2={float(a2[debug_depth_idx]):.6e} "
+                        f"abs3={float(a3[debug_depth_idx]):.6e} "
+                        f"logacont={log_abs_val:.6e} acont={10 ** log_abs_val:.6e} "
+                        f"logascat={log_scat_val:.6e} ascat={10 ** log_scat_val:.6e}"
+                    )
 
             # NOTE: Previous "fix" with log10(3.72) was WRONG
             # The NPZ stores correct SIGMAC values without any extra factor

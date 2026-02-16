@@ -4,14 +4,14 @@ from __future__ import annotations
 
 import logging
 import math
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence
 
 import numpy as np
 
-from . import fort9 as fort9_io
-from .tfort import find_companion_tape14, parse_tfort14, _ELEMENT_SYMBOLS
+from .tfort import _ELEMENT_SYMBOLS
 
 _CM_INV_PER_EV = 8065.54429
 
@@ -208,6 +208,8 @@ class LineRecord:
     """Minimal representation of an atomic spectral line."""
 
     wavelength: float
+    # High-precision wavelength for grid indexing (derived from energies).
+    index_wavelength: float
     element: str
     ion_stage: int
     log_gf: float
@@ -222,6 +224,17 @@ class LineRecord:
     # Principal quantum numbers for hydrogen/helium (NBLO, NBUP in Fortran)
     n_lower: int = 0
     n_upper: int = 0
+    # Additional rgfall metadata needed for fort.19 generation
+    code: float = 0.0
+    iso1: int = 0
+    iso2: int = 0
+    line_size: int = 0
+    labelp: str = ""
+    xj: float = 0.0
+    xjp: float = 0.0
+    gamma_rad_log: float = 0.0
+    gamma_stark_log: float = 0.0
+    gamma_vdw_log: float = 0.0
 
 
 @dataclass
@@ -231,6 +244,7 @@ class LineCatalog:
     records: List[LineRecord]
     # Precomputed arrays for vectorised operations
     wavelength: np.ndarray
+    index_wavelength: np.ndarray
     log_gf: np.ndarray
     gf: np.ndarray
     excitation_energy: np.ndarray
@@ -248,6 +262,13 @@ class LineCatalog:
     @classmethod
     def from_records(cls, records: Sequence[LineRecord]) -> "LineCatalog":
         wavelength = np.array([rec.wavelength for rec in records], dtype=np.float64)
+        index_wavelength = np.array(
+            [
+                rec.index_wavelength if rec.index_wavelength > 0.0 else rec.wavelength
+                for rec in records
+            ],
+            dtype=np.float64,
+        )
         log_gf = np.array([rec.log_gf for rec in records], dtype=np.float64)
         gf = np.power(10.0, log_gf)
         excitation = np.array(
@@ -264,6 +285,7 @@ class LineCatalog:
         return cls(
             records=list(records),
             wavelength=wavelength,
+            index_wavelength=index_wavelength,
             log_gf=log_gf,
             gf=gf,
             excitation_energy=excitation,
@@ -296,54 +318,6 @@ def load_catalog(path: Path) -> LineCatalog:
 
     records: List[LineRecord] = []
 
-    tape14 = find_companion_tape14(path)
-    if tape14 is not None:
-        for rec in parse_tfort14(tape14):
-            metadata: Dict[str, float] = {}
-            n_lower_val = 0
-            n_upper_val = 0
-            if rec.n_lower is not None:
-                n_lower_val = int(rec.n_lower)
-                metadata["n_lower"] = float(rec.n_lower)
-            if rec.n_upper is not None:
-                n_upper_val = int(rec.n_upper)
-                metadata["n_upper"] = float(rec.n_upper)
-
-            wavelength = (
-                rec.wavelength_vac if rec.wavelength_vac > 0.0 else rec.wavelength_air
-            )
-            # Keep excitation in cm^-1 (matches Fortran ELO)
-            excitation_cm = rec.excitation_energy_cm
-
-            # Determine line type for tape14 records
-            line_type_t14 = 0
-            if rec.element_symbol == "H" and rec.ion_stage == 1:
-                line_type_t14 = -1  # Hydrogen
-            elif rec.element_symbol == "He" and rec.ion_stage == 1:
-                line_type_t14 = -3  # Helium I
-            elif rec.element_symbol == "He" and rec.ion_stage == 2:
-                line_type_t14 = -6  # Helium II
-
-            records.append(
-                LineRecord(
-                    wavelength=float(wavelength),
-                    element=rec.element_symbol,
-                    ion_stage=rec.ion_stage,
-                    log_gf=float(rec.log_gf),
-                    excitation_energy=float(excitation_cm),
-                    gamma_rad=float(rec.gamma_rad),
-                    gamma_stark=float(rec.gamma_stark),
-                    gamma_vdw=float(rec.gamma_vdw),
-                    metadata=metadata,
-                    line_type=line_type_t14,
-                    n_lower=n_lower_val,
-                    n_upper=n_upper_val,
-                )
-            )
-        # Deduplicate before returning (tape14 path)
-        records = _deduplicate_lines(records)
-        return LineCatalog.from_records(records)
-
     def iter_lines() -> Iterable[str]:
         with path.open("r", encoding="ascii", errors="ignore") as fh:
             return fh.read().splitlines()
@@ -365,16 +339,55 @@ def load_catalog(path: Path) -> LineCatalog:
                 excitation_str = line[24:36].strip()
                 # EP is upper level energy (positions 52-63)
                 excitation_upper_str = line[52:64].strip()
+                xj_str = line[36:41].strip()
+                xjp_str = line[64:69].strip()
+                labelp_str = line[70:78].strip() if len(line) >= 78 else ""
                 gamma_rad_str = line[80:86].strip()
                 gamma_stark_str = line[86:92].strip()
                 gamma_vdw_str = line[92:98].strip()
+                iso1_str = line[106:109].strip() if len(line) >= 109 else ""
+                iso2_str = line[116:119].strip() if len(line) >= 119 else ""
+                isoshift_str = line[154:160].strip() if len(line) >= 160 else ""
+                cother1_str = line[124:134] if len(line) >= 134 else ""
+                cother2_str = line[134:144] if len(line) >= 144 else ""
 
                 # Parse numeric values
-                wavelength_stored = float(
-                    wavelength_str
-                )  # Stored in nm (not Angstroms!)
-                log_gf = float(log_gf_str)
+                # GFALL wavelengths in this dataset are already in nm.
+                wavelength_stored = float(wavelength_str)
+                log_gf_raw = float(log_gf_str)
                 code = float(code_str)
+
+                # CRITICAL FIX (Dec 2025): Parse X1 and X2 isotopic abundance corrections
+                # Fortran rgfall.for line 160: GF=10.**(GFLOG+DGFLOG+X1+X2)
+                # X1 and X2 are LOG FRACTIONAL ISOTOPIC ABUNDANCES that scale the gf value
+                # For hyperfine/isotope lines, each component has the FULL parent gflog,
+                # but X1+X2 contain negative values that reduce it to the correct fraction.
+                # Without this correction, Python overestimates opacity by 10-20× per component!
+                #
+                # Format from rgfall.for line 122-123:
+                #   ...A4,I2,I2,I3,F6.3,I3,F6.3,...
+                #   REF(99-102), NBLO(103-104), NBUP(105-106), ISO1(107-109), X1(110-115), ISO2(116-118), X2(119-124)
+                x1 = 0.0
+                x2 = 0.0
+                if len(line) >= 115:
+                    x1_str = line[109:115].strip()
+                    if x1_str:
+                        try:
+                            x1 = float(x1_str)
+                        except ValueError:
+                            pass
+                if len(line) >= 124:
+                    x2_str = line[118:124].strip()
+                    if x2_str:
+                        try:
+                            x2 = float(x2_str)
+                        except ValueError:
+                            pass
+
+                # Apply isotopic abundance correction (Fortran rgfall.for line 160)
+                # Allow disabling to match runs where X1/X2 are not applied.
+                apply_iso_corr = os.environ.get("PY_APPLY_ISO_CORR", "1") != "0"
+                log_gf = log_gf_raw + (x1 + x2 if apply_iso_corr else 0.0)
                 e_val = float(excitation_str)  # First energy column (E)
                 ep_val = (
                     float(excitation_upper_str) if excitation_upper_str else 0.0
@@ -405,7 +418,7 @@ def load_catalog(path: Path) -> LineCatalog:
                 # The gfallvac.latest file stores vacuum wavelengths that ALREADY include
                 # hyperfine structure shifts (ESHIFT, ESHIFTP) and isotope shifts (DWLISO).
                 # These are computed by rgfall.for as:
-                #   WLVAC = 1.D7/|EP+ESHIFTP-(E+ESHIFT)| + DWL + DWLISO
+                #   WLVAC = 1.D7/|EP+ESHIFTP-(E+ESHIFT)| + DWL + DWLISO  (nm)
                 #
                 # When Python recomputes from energy levels WITHOUT these shifts, all
                 # hyperfine components get the SAME wavelength (e.g., all 12 Co I
@@ -417,6 +430,35 @@ def load_catalog(path: Path) -> LineCatalog:
                 # Evidence: Fortran rgfall.for line 131 comment:
                 #   "definition of dwliso changed, now in mA and WL already includes dwliso"
                 wavelength = wavelength_stored
+                # High-precision wavelength for grid indexing (derived from energies).
+                # This matches Fortran NBUFF rounding (uses full-precision energies).
+                index_wavelength = wavelength
+                eshift = 0.0
+                eshiftp = 0.0
+                if cother1_str.strip():
+                    try:
+                        ishift = int(cother1_str[0:5])
+                        ishiftp = int(cother1_str[5:10])
+                        eshift = ishift * 1.0e-3
+                        eshiftp = ishiftp * 1.0e-3
+                    except ValueError:
+                        eshift = 0.0
+                        eshiftp = 0.0
+
+                energy_diff = abs((abs(ep_val) + eshiftp) - (abs(e_val) + eshift))
+                if energy_diff > 0.0:
+                    dwliso = 0.0
+                    if isoshift_str:
+                        try:
+                            dwliso = int(isoshift_str) * 1.0e-4
+                        except ValueError:
+                            dwliso = 0.0
+                    energy_wl = 1.0e7 / energy_diff + dwliso
+                    # Fortran rgfall computes WLVAC from energies (IFVAC=1), and
+                    # uses that for NBUFF rounding and for CGF normalization.
+                    # Match that behavior by adopting the energy-derived wavelength.
+                    wavelength = energy_wl
+                    index_wavelength = energy_wl
 
                 # DEFAULT DAMPING PARAMETERS - Exact Fortran rgfall.for behavior
                 # Fortran computes defaults when GR, GS, or GW are 0 in the line list
@@ -424,13 +466,13 @@ def load_catalog(path: Path) -> LineCatalog:
 
                 # Radiative damping default (rgfall.for lines 171-173):
                 # IF(GR.EQ.0.)THEN
-                #   GAMMAR = 2.223D13 / WLVAC**2  (WLVAC in nm!)
+                #   GAMMAR = 2.223D13 / WLVAC**2  (WLVAC in ANGSTROMS!)
                 #   GR = ALOG10(GAMMAR)
                 # ENDIF
-                # CRITICAL FIX (Dec 2025): WLVAC is in nm, NOT Angstroms!
-                # The formula gives gamma in s^-1 when wavelength is in nm.
                 if gamma_rad == 0.0:
-                    gammar_default = 2.223e13 / (wavelength**2)  # wavelength in nm
+                    # Fortran rgfall.for uses WLVAC in nm (1e7/nu, with nu in cm^-1).
+                    # So the default GAMMAR uses the NM wavelength directly.
+                    gammar_default = 2.223e13 / (wavelength**2)
                     gamma_rad = gammar_default  # Store linear, not log
 
                 # Stark damping default - EXACT Fortran formula using POTION
@@ -453,10 +495,17 @@ def load_catalog(path: Path) -> LineCatalog:
                         10.0**gamma_vdw_log_val if gamma_vdw_log_val != 0.0 else 0.0
                     )
 
-                # NOTE: Gamma values are stored in LINEAR form (s^-1), NOT normalized
-                # The normalization by 4π*freq in rgfall.for (lines 271-273) is ONLY
-                # for fort.19 special lines, NOT for the main fort.12 synthesis loop.
-                # synthe.for reads fort.12 with UN-normalized gamma values.
+                # Normalize damping parameters to match rgfall -> tfort.12.
+                # rgfall.for lines 266-273:
+                #   FRELIN=2.99792458D17/WLVAC
+                #   GAMMAR=GAMMAR/12.5664D0/FRELIN
+                #   GAMMAS=GAMMAS/12.5664D0/FRELIN
+                #   GAMMAW=GAMMAW/12.5664D0/FRELIN
+                # synthe.for reads these normalized values from fort.12.
+                frelin = 2.99792458e17 / max(wavelength, 1e-12)
+                gamma_rad = gamma_rad / (12.5664 * frelin)
+                gamma_stark = gamma_stark / (12.5664 * frelin)
+                gamma_vdw = gamma_vdw / (12.5664 * frelin)
 
                 # Extract element and ion_stage from CODE
                 # CODE format: nelem.ion_stage (e.g., 18.00 = element 18, ion stage 1)
@@ -486,15 +535,51 @@ def load_catalog(path: Path) -> LineCatalog:
                     except (ValueError, IndexError):
                         pass
 
-                # Determine line type based on CODE (matching Fortran rgfall.for lines 250-256)
+                # Parse ISO1/ISO2 and AUTO/LINESIZE metadata (rgfall.for lines 113-127)
+                iso1_val = 0
+                iso2_val = 0
+                if iso1_str:
+                    try:
+                        iso1_val = int(iso1_str)
+                    except ValueError:
+                        iso1_val = 0
+                if iso2_str:
+                    try:
+                        iso2_val = int(iso2_str)
+                    except ValueError:
+                        iso2_val = 0
+
+                line_size = 0
+                auto_tag = ""
+                if cother2_str.strip():
+                    line_size_str = cother2_str[6:7]
+                    auto_tag = cother2_str[7:10].strip()
+                    if line_size_str.strip().isdigit():
+                        line_size = int(line_size_str)
+
+                # Determine line type based on CODE and AUTO tag (rgfall.for lines 239-259)
                 # TYPE=-1: Hydrogen (CODE=1.00)
-                # TYPE=-2: Deuterium (CODE=1.00 with ISO1=2, but we can't distinguish here)
+                # TYPE=-2: Deuterium (CODE=1.00 with ISO1=2)
                 # TYPE=-3: Helium I (CODE=2.00)
+                # TYPE=-4: Helium-3 I (CODE=2.00 with ISO1=3)
                 # TYPE=-6: Helium II (CODE=2.01)
+                # TYPE=1: Autoionizing line (AUTO='AUT')
+                # TYPE=2: Coronal approximation line (AUTO='COR')
+                # TYPE=3: PRD line (AUTO='PRD')
                 # TYPE=0: Normal line (Voigt profile)
                 line_type = 0
-                if nelem == 1 and ion_stage == 1:
+                if auto_tag == "AUT":
+                    line_type = 1
+                elif auto_tag == "COR":
+                    line_type = 2
+                elif auto_tag == "PRD":
+                    line_type = 3
+                elif nelem == 1 and ion_stage == 1 and iso1_val == 2:
+                    line_type = -2  # Deuterium
+                elif nelem == 1 and ion_stage == 1:
                     line_type = -1  # Hydrogen
+                elif nelem == 2 and ion_stage == 1 and iso1_val == 3:
+                    line_type = -4  # Helium-3 I
                 elif nelem == 2 and ion_stage == 1:
                     line_type = -3  # Helium I
                 elif nelem == 2 and ion_stage == 2:
@@ -503,6 +588,7 @@ def load_catalog(path: Path) -> LineCatalog:
                 records.append(
                     LineRecord(
                         wavelength=wavelength,
+                        index_wavelength=float(index_wavelength),
                         element=element,
                         ion_stage=ion_stage,
                         log_gf=log_gf,
@@ -514,6 +600,16 @@ def load_catalog(path: Path) -> LineCatalog:
                         line_type=line_type,
                         n_lower=n_lower,
                         n_upper=n_upper,
+                        code=code,
+                        iso1=iso1_val,
+                        iso2=iso2_val,
+                        line_size=line_size,
+                        labelp=labelp_str,
+                        xj=float(xj_str) if xj_str else 0.0,
+                        xjp=float(xjp_str) if xjp_str else 0.0,
+                        gamma_rad_log=gamma_rad_log,
+                        gamma_stark_log=gamma_stark_log,
+                        gamma_vdw_log=gamma_vdw_log,
                     )
                 )
                 continue
@@ -562,6 +658,7 @@ def load_catalog(path: Path) -> LineCatalog:
             records.append(
                 LineRecord(
                     wavelength=wavelength,
+                    index_wavelength=float(wavelength),
                     element=element,
                     ion_stage=ion_stage,
                     log_gf=log_gf,
@@ -573,74 +670,22 @@ def load_catalog(path: Path) -> LineCatalog:
                     line_type=line_type_ws,
                     n_lower=n_lower_val,
                     n_upper=n_upper_val,
+                    code=0.0,
+                    iso1=0,
+                    iso2=0,
+                    line_size=0,
+                    labelp="",
+                    xj=0.0,
+                    xjp=0.0,
+                    gamma_rad_log=0.0,
+                    gamma_stark_log=0.0,
+                    gamma_vdw_log=0.0,
                 )
             )
         except (ValueError, IndexError):
             continue  # Skip invalid lines
 
     # Deduplicate before returning (main parsing path in load_catalog)
-    records = _deduplicate_lines(records)
-    return LineCatalog.from_records(records)
-
-
-def catalog_from_fort9(data: fort9_io.Fort9Data) -> LineCatalog:
-    """Build a minimal line catalog from the fort.9 archive."""
-
-    meta = fort9_io.decode_metadata(data)
-    records: List[LineRecord] = []
-    for idx in range(data.n_lines):
-        wavelength = float(data.wavelength[idx])
-        code = float(meta.code[idx])
-        nelem = int(code + 1e-6)
-        frac = code - nelem
-        ion_stage = int(round(frac * 100.0)) + 1 if frac > 1e-6 else 1
-        if 0 < nelem < len(_ELEMENT_SYMBOLS):
-            element = _ELEMENT_SYMBOLS[nelem]
-        else:
-            element = f"Z{nelem}"
-        log_gf = float(meta.gf_log[idx])
-        # Keep excitation in cm^-1 (matches Fortran ELO)
-        excitation_cm = float(meta.excitation_lower[idx])
-        gamma_rad = float(meta.gamma_rad[idx])
-        gamma_stark = float(meta.gamma_stark[idx])
-        gamma_vdw = float(meta.gamma_vdw[idx])
-        n_lower_f9 = int(meta.nblo[idx])
-        n_upper_f9 = int(meta.nbup[idx])
-        metadata: Dict[str, float] = {
-            "n_lower": float(n_lower_f9),
-            "n_upper": float(n_upper_f9),
-            "ncon": float(meta.ncon[idx]),
-            "nelion": float(meta.nelion[idx]),
-            "nelionx": float(meta.nelionx[idx]),
-        }
-
-        # Determine line type based on element (matching Fortran rgfall.for)
-        line_type_f9 = 0
-        if nelem == 1 and ion_stage == 1:
-            line_type_f9 = -1  # Hydrogen
-        elif nelem == 2 and ion_stage == 1:
-            line_type_f9 = -3  # Helium I
-        elif nelem == 2 and ion_stage == 2:
-            line_type_f9 = -6  # Helium II
-
-        records.append(
-            LineRecord(
-                wavelength=wavelength,
-                element=element,
-                ion_stage=max(1, ion_stage),
-                log_gf=log_gf,
-                excitation_energy=excitation_cm,
-                gamma_rad=gamma_rad,
-                gamma_stark=gamma_stark,
-                gamma_vdw=gamma_vdw,
-                metadata=metadata,
-                line_type=line_type_f9,
-                n_lower=n_lower_f9,
-                n_upper=n_upper_f9,
-            )
-        )
-
-    # Deduplicate before returning (main parsing path)
     records = _deduplicate_lines(records)
     return LineCatalog.from_records(records)
 
@@ -674,7 +719,13 @@ def _deduplicate_lines(records: List[LineRecord]) -> List[LineRecord]:
 _DELLIM = np.array([100.0, 30.0, 10.0, 3.0, 1.0, 0.3, 0.1], dtype=np.float64)
 
 
-def _get_line_margin(line_type: int, element: str, wl_min: float) -> float:
+def _get_line_margin(
+    line_type: int,
+    element: str,
+    wl_min: float,
+    line_size: int = 0,
+    code: float = 0.0,
+) -> float:
     """Get the wavelength margin for a line based on Fortran rgfall.for DELLIM logic.
 
     Fortran rgfall.for lines 145-148:
@@ -699,21 +750,14 @@ def _get_line_margin(line_type: int, element: str, wl_min: float) -> float:
     # Compute DELFACTOR (rgfall.for line 96)
     delfactor = 1.0 if wl_min <= 500.0 else wl_min / 500.0
 
-    # Determine LINESIZE based on line type/element (matches rgfall.for)
-    if line_type == -1 or element == "H":  # Hydrogen
-        linesize = 7
-    elif line_type == -2 or element == "D":  # Deuterium
-        linesize = 7
-    elif line_type == -6 or element == "He":  # Helium II or He I
-        # He I lines have variable LINESIZE (5-7), He II has 7
-        # Use conservative value of 5 for general He
-        linesize = 5 if line_type == -3 else 7
-    else:
-        linesize = 0  # Regular atomic lines
-
-    # Compute LIM (1-based Fortran index, convert to 0-based)
-    # Fortran: LIM = MIN(8 - LINESIZE, 7) where LIM is 1-7
-    lim_fortran = min(8 - linesize, 7)  # 1-based
+    # Match rgfall.for lines 145-147:
+    #   LIM=MIN(8-LINESIZE,7)
+    #   IF(CODE.EQ.1.)LIM=1
+    linesize = int(line_size) if line_size > 0 else 0
+    lim_fortran = min(8 - linesize, 7)
+    # CODE can be unavailable in some non-gfall formats; fallback to element/type.
+    if abs(float(code) - 1.0) < 1.0e-6 or line_type in (-1, -2) or element in {"H", "D"}:
+        lim_fortran = 1
     lim_index = lim_fortran - 1  # 0-based for Python array
 
     return _DELLIM[lim_index] * delfactor
@@ -754,7 +798,13 @@ def filter_by_range(
 
     for i, rec in enumerate(catalog.records):
         wl = rec.wavelength
-        margin = _get_line_margin(rec.line_type, rec.element, wl_min)
+        margin = _get_line_margin(
+            rec.line_type,
+            rec.element,
+            wl_min,
+            rec.line_size,
+            rec.code,
+        )
 
         # Apply Fortran's filtering logic (rgfall.for lines 147-148)
         if wl >= wl_min - margin and wl <= wl_max + margin:

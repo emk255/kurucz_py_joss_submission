@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import Dict
 
 import numpy as np
 
@@ -39,6 +40,7 @@ class SynthResult:
     wavelength: np.ndarray
     intensity: np.ndarray
     continuum: np.ndarray
+    timings: Dict[str, float] = field(default_factory=dict)
 
 
 def allocate_buffers(wavelength: np.ndarray, depth_layers: int) -> SpectrumBuffers:

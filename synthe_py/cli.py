@@ -43,12 +43,6 @@ def build_parser() -> argparse.ArgumentParser:
         "--wl-end", type=float, default=1800.0, help="End wavelength (nm)"
     )
     parser.add_argument(
-        "--wl-range",
-        type=str,
-        default=None,
-        help="Wavelength range as 'start:end' (e.g., '400:500') - filters grid to this range",
-    )
-    parser.add_argument(
         "--resolution",
         type=float,
         default=300_000.0,
@@ -78,6 +72,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Optional directory for cached line data",
     )
     parser.add_argument(
+        "--allow-tfort-runtime",
+        action="store_true",
+        help="Allow using tfort.* files as runtime line input (compatibility/debug mode only).",
+    )
+    parser.add_argument(
         "--fort20",
         type=Path,
         default=None,
@@ -88,24 +87,6 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=None,
         help="Optional fort.29 (ASYNTH) NPZ (deprecated, not used - wavelength grid built from config)",
-    )
-    parser.add_argument(
-        "--fort9",
-        type=Path,
-        default=None,
-        help="Optional fort.9 (ALINEC) NPZ - only used for metadata if provided (populations computed from Saha-Boltzmann)",
-    )
-    parser.add_argument(
-        "--fort19",
-        type=Path,
-        default=None,
-        help="Optional fort.19 (wing metadata) file - only used for special wing profiles if provided",
-    )
-    parser.add_argument(
-        "--spectrv-input",
-        type=Path,
-        default=None,
-        help="Optional spectrv input card (e.g. spectrv_std.input)",
     )
     parser.add_argument(
         "--n-workers",
@@ -122,6 +103,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--skip-hydrogen-wings",
         action="store_true",
         help="Skip hydrogen wing computation (much faster, continuum only)",
+    )
+    parser.add_argument(
+        "--no-line-filter",
+        action="store_true",
+        help="Disable wavelength filtering of the line catalog (matches full SYNTHE runs but slower)",
     )
     parser.add_argument(
         "--subsample",
@@ -174,18 +160,6 @@ def main(argv: Optional[list[str]] = None) -> int:
         diagnostics_path = args.spec.with_suffix(".npz")
 
     # Parse wavelength range if provided
-    wl_range_filter = None
-    if args.wl_range:
-        try:
-            parts = args.wl_range.split(":")
-            if len(parts) != 2:
-                raise ValueError("--wl-range must be in format 'start:end'")
-            wl_range_start = float(parts[0])
-            wl_range_end = float(parts[1])
-            wl_range_filter = (wl_range_start, wl_range_end)
-        except ValueError as e:
-            parser.error(f"Invalid --wl-range format: {e}")
-
     cfg = config.SynthesisConfig.from_cli(
         spec_path=args.spec,
         diagnostics_path=diagnostics_path,
@@ -203,17 +177,15 @@ def main(argv: Optional[list[str]] = None) -> int:
         scattering_tolerance=args.scat_tol,
         fort20=args.fort20,
         fort29=args.fort29,
-        fort9=args.fort9,
-        fort19=args.fort19,
-        spectrv_input=args.spectrv_input,
         rhoxj_scale=args.rhoxj,
         enable_helium_wings=not args.no_helium_wings,
         skip_hydrogen_wings=args.skip_hydrogen_wings,
+        line_filter=not args.no_line_filter,
         wavelength_subsample=args.subsample,
-        wavelength_range_filter=wl_range_filter,
         npz_path=args.npz,
         n_workers=args.n_workers,
         debug=args.debug,
+        allow_tfort_runtime=args.allow_tfort_runtime,
     )
     if args.cache:
         cfg.line_data.cache_directory = args.cache

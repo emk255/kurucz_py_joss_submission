@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Optional, Tuple
 
 import numpy as np
@@ -18,11 +18,11 @@ _K_BOLTZ = 1.380649e-16  # erg / K
 
 def _planck_nu(freq: float, temperature: np.ndarray) -> np.ndarray:
     """Compute Planck function B_nu(T) using Fortran's exact formula.
-    
+
     Fortran formula (atlas7v.for line 190):
     BNU(J) = 1.47439D-2 * FREQ15^3 * EHVKT(J) / STIM(J)
     Where FREQ15 = FREQ / 1.D15, EHVKT = exp(-FREQ*HKT), STIM = 1 - EHVKT
-    
+
     This matches Fortran exactly to avoid any numerical precision differences.
     """
     # CRITICAL FIX: Match Fortran exactly - no clamping of temperature or STIM
@@ -82,8 +82,12 @@ def solve_lte_frequency(
         print(f"  cont_scat < MAX: {np.sum(cont_scat < MAX_OPACITY_REAL4)}")
         print(f"  line_opacity < MAX: {np.sum(line_opacity < MAX_OPACITY_REAL4)}")
         print(f"  line_scattering < MAX: {np.sum(line_scattering < MAX_OPACITY_REAL4)}")
-        print(f"  line_opacity max: {np.max(line_opacity) if line_opacity.size > 0 else 'N/A':.8E}")
-        print(f"  line_scattering max: {np.max(line_scattering) if line_scattering.size > 0 else 'N/A':.8E}")
+        print(
+            f"  line_opacity max: {np.max(line_opacity) if line_opacity.size > 0 else 'N/A':.8E}"
+        )
+        print(
+            f"  line_scattering max: {np.max(line_scattering) if line_scattering.size > 0 else 'N/A':.8E}"
+        )
         print(f"  Mask sum: {np.sum(mask)}")
         print(f"{'='*70}\n")
         return 0.0, 0.0
@@ -122,29 +126,33 @@ def solve_lte_frequency(
     cont_s = cont_s_valid
     line_a = line_a_valid
     line_sig = line_sig_valid
-    
+
     # Fortran convention: J=1 is surface (small RHOX), J=NRHOX is deep (large RHOX)
     # INTEG requires RHOX to be monotonically increasing (surface → deep)
     # Fortran does NOT check array order - it assumes arrays are already correct
     # We should match Fortran: assume arrays are in correct order, only reverse if mass is decreasing
-    
+
     # CRITICAL FIX: Match Fortran behavior - only reverse if mass is decreasing
     # Fortran doesn't check individual opacity arrays, it just uses them as-is
     # The only reversal needed is if RHOX itself is decreasing (which shouldn't happen with correct NPZ files)
-    line_a_was_reversed = False  # Track if line_a was reversed (for line_source alignment)
+    line_a_was_reversed = (
+        False  # Track if line_a was reversed (for line_source alignment)
+    )
     if mass.size > 1:
         mass_increasing = mass[0] < mass[-1]
-        
+
         # Fortran does NOT check individual opacity arrays - it assumes they're already in correct order
         # Only reverse ALL arrays together if mass is decreasing (which shouldn't happen with correct NPZ files)
         # This matches Fortran's behavior: arrays are assumed to be in correct order (surface → deep)
-        
+
         # Now ensure mass is in increasing order (surface → deep) for INTEG
         # Fortran's INTEG requires RHOX to be monotonically increasing
         if not mass_increasing:
             # mass is decreasing, reverse everything (matching Fortran's expectation that RHOX increases)
             if wavelength_nm < 400.0:
-                print(f"  WARNING: Mass is decreasing, reversing all arrays to match Fortran convention")
+                print(
+                    f"  WARNING: Mass is decreasing, reversing all arrays to match Fortran convention"
+                )
             mass = mass[::-1]
             temp = temp[::-1]
             cont_a = cont_a[::-1]
@@ -155,7 +163,7 @@ def solve_lte_frequency(
                 line_source = line_source[::-1]
             # Reset line_a_was_reversed since we've reversed everything together
             line_a_was_reversed = False
-    
+
     # CRITICAL FIX: Match Fortran behavior - no clipping of opacity arrays
     # Fortran uses REAL*8 (double precision) and doesn't clip opacity arrays
     # Arrays are already float64 from masking/conversion above, matching Fortran REAL*8
@@ -163,10 +171,10 @@ def solve_lte_frequency(
 
     freq = _C_LIGHT_NM / max(wavelength_nm, 1e-12)
     planck = _planck_nu(freq, temp)
-    
+
     if line_source is not None:
         ls_full = np.asarray(line_source, dtype=np.float64)
-        
+
         # CRITICAL FIX: Reverse line_source in FULL array if line_a was reversed
         # This must happen BEFORE masking to keep them aligned after masking
         # We do this here (after getting the full array) rather than earlier to avoid
@@ -175,7 +183,7 @@ def solve_lte_frequency(
             if wavelength_nm < 400.0:
                 print(f"  REVERSING line_source full array (line_a was reversed)")
             ls_full = ls_full[::-1]
-        
+
         # CRITICAL: Filter NaN/INF from line_source BEFORE masking
         # Fortran would propagate NaN/INF, but we need to filter them to prevent flux calculation failures
         # However, we should log warnings to match Fortran's behavior
@@ -183,6 +191,7 @@ def solve_lte_frequency(
         inf_mask_full = np.isinf(ls_full)
         if np.any(nan_mask_full) or np.any(inf_mask_full):
             import logging
+
             logger = logging.getLogger(__name__)
             if np.any(nan_mask_full):
                 logger.warning(
@@ -204,22 +213,24 @@ def solve_lte_frequency(
         ls = ls_full[mask][valid_mask]  # Already in correct order (aligned with line_a)
     else:
         ls = None
-    
+
     line_src = ls if ls is not None else planck
-    
+
     # CRITICAL FIX: line_source was already reversed in FULL array when line_a was reversed
     # So after masking, line_src should already be aligned with line_a
     # No need to reverse line_src again here - it's already in the correct order
     # The reversal happened in the full array before masking, so masking preserves alignment
-    
+
     # CRITICAL DEBUG: Check line_source values at problematic wavelengths
     if line_source is not None and (312.36 <= wavelength_nm <= 312.64):
         print(f"\n{'='*70}")
         print(f"DEBUG: Line source values at {wavelength_nm:.6f} nm")
         print(f"{'='*70}")
         print(f"  line_a_was_reversed: {line_a_was_reversed}")
-        print(f"  ls_full shape (after reversal check): {ls_full.shape if 'ls_full' in locals() else 'N/A'}")
-        if 'ls_full' in locals():
+        print(
+            f"  ls_full shape (after reversal check): {ls_full.shape if 'ls_full' in locals() else 'N/A'}"
+        )
+        if "ls_full" in locals():
             print(f"  ls_full[0] (first element): {ls_full[0]:.6e}")
             print(f"  ls_full[-1] (last element): {ls_full[-1]:.6e}")
         print(f"  ls shape (after masking): {ls.shape if ls is not None else 'None'}")
@@ -230,12 +241,16 @@ def solve_lte_frequency(
         print(f"  line_src[-1] (deep): {line_src[-1]:.6e}")
         print(f"  planck[-1] (deep): {planck[-1]:.6e}")
         print(f"  line_src[0] / planck[0]: {line_src[0] / max(planck[0], 1e-40):.6e}")
-        print(f"  line_src[-1] / planck[-1]: {line_src[-1] / max(planck[-1], 1e-40):.6e}")
+        print(
+            f"  line_src[-1] / planck[-1]: {line_src[-1] / max(planck[-1], 1e-40):.6e}"
+        )
         print(f"  line_src == planck? {np.allclose(line_src, planck, rtol=1e-3)}")
         print(f"  Max difference: {np.abs(line_src - planck).max():.6e}")
-        print(f"  Is line_src reversed? {np.isclose(line_src[0], planck[-1], rtol=1e-3)}")
+        print(
+            f"  Is line_src reversed? {np.isclose(line_src[0], planck[-1], rtol=1e-3)}"
+        )
         # Check alignment with line_a
-        if 'line_a' in locals() and line_a.size > 0:
+        if "line_a" in locals() and line_a.size > 0:
             print(f"  Alignment check:")
             print(f"    line_a[0] (surface): {line_a[0]:.6e}")
             print(f"    line_a[-1] (deep): {line_a[-1]:.6e}")
@@ -258,7 +273,9 @@ def solve_lte_frequency(
         print(f"  valid_mask sum: {np.sum(valid_mask)}")
         if line_opacity.size > 0:
             print(f"  line_opacity[0] (before mask): {line_opacity[0]:.8E}")
-            print(f"  line_opacity[0] < MAX_OPACITY_REAL4? {line_opacity[0] < MAX_OPACITY_REAL4}")
+            print(
+                f"  line_opacity[0] < MAX_OPACITY_REAL4? {line_opacity[0] < MAX_OPACITY_REAL4}"
+            )
             print(f"  isfinite(line_opacity[0])? {np.isfinite(line_opacity[0])}")
             # Check mask conditions for first layer
             print(f"  mask[0] breakdown:")
@@ -267,16 +284,20 @@ def solve_lte_frequency(
             print(f"    isfinite(cont_abs[0]): {np.isfinite(cont_abs[0])}")
             print(f"    isfinite(cont_scat[0]): {np.isfinite(cont_scat[0])}")
             print(f"    isfinite(line_opacity[0]): {np.isfinite(line_opacity[0])}")
-            print(f"    isfinite(line_scattering[0]): {np.isfinite(line_scattering[0])}")
+            print(
+                f"    isfinite(line_scattering[0]): {np.isfinite(line_scattering[0])}"
+            )
             print(f"    cont_abs[0] < MAX: {cont_abs[0] < MAX_OPACITY_REAL4}")
             print(f"    cont_scat[0] < MAX: {cont_scat[0] < MAX_OPACITY_REAL4}")
             print(f"    line_opacity[0] < MAX: {line_opacity[0] < MAX_OPACITY_REAL4}")
-            print(f"    line_scattering[0] < MAX: {line_scattering[0] < MAX_OPACITY_REAL4}")
+            print(
+                f"    line_scattering[0] < MAX: {line_scattering[0] < MAX_OPACITY_REAL4}"
+            )
             print(f"    mask[0] = {mask[0]}")
         if line_a.size > 0:
             print(f"  line_a[0] (after mask): {line_a[0]:.8E}")
         print(f"{'='*70}\n")
-    
+
     # Debug flag: enable for problematic wavelengths
     problem_waves = [
         300.911,
@@ -291,12 +312,19 @@ def solve_lte_frequency(
         305.999,
         300.12016916,  # Add wavelength with line opacity
         300.00040572,
+        318.839251,
+        318.877513,
     ]
     debug = any(abs(wavelength_nm - w) < 0.01 for w in problem_waves)
 
     # CRITICAL DEBUG: Always check planck[0] for 300.00040572
     # Also enable debug for JOSH solver to get ATLAS7V debug output
-    debug_wavelength = abs(wavelength_nm - 300.00040572) < 0.0001
+    debug_wavelength = (
+        abs(wavelength_nm - 300.00040572) < 0.0001
+        or abs(wavelength_nm - 418.148489) < 0.0001
+        or abs(wavelength_nm - 403.188153) < 0.0001
+        or abs(wavelength_nm - 319.490345) < 0.0001
+    )
     if debug_wavelength:
         print(f"\n{'='*70}")
         print(f"CRITICAL DEBUG: Wavelength {wavelength_nm:.8f} nm")
@@ -335,48 +363,27 @@ def solve_lte_frequency(
     # Enable debug for specific wavelengths to match Fortran debug output
     # Also enable debug if line opacity is huge (potential TAUNU overflow issue)
     debug_josh = debug or debug_wavelength or huge_line_opacity
-    
+
     # CRITICAL DEBUG: Check line_a values before passing to solve_josh_flux
     if debug_josh:
         print(f"\n{'='*70}")
         print(f"BEFORE solve_josh_flux (TOTAL FLUX)")
         print(f"{'='*70}")
         print(f"  line_a size: {line_a.size}")
-        print(f"  line_a[0] = {line_a[0]:.8E}" if line_a.size > 0 else "  line_a is empty")
+        print(
+            f"  line_a[0] = {line_a[0]:.8E}" if line_a.size > 0 else "  line_a is empty"
+        )
         print(f"  line_a max = {np.max(line_a):.8E}" if line_a.size > 0 else "  N/A")
         print(f"  line_a non-zero count: {np.count_nonzero(line_a)}")
-        print(f"  line_sig[0] = {line_sig[0]:.8E}" if line_sig.size > 0 else "  line_sig is empty")
-        print(f"  line_sig max = {np.max(line_sig):.8E}" if line_sig.size > 0 else "  N/A")
+        print(
+            f"  line_sig[0] = {line_sig[0]:.8E}"
+            if line_sig.size > 0
+            else "  line_sig is empty"
+        )
+        print(
+            f"  line_sig max = {np.max(line_sig):.8E}" if line_sig.size > 0 else "  N/A"
+        )
         print(f"  line_sig non-zero count: {np.count_nonzero(line_sig)}")
-        print(f"{'='*70}\n")
-    
-    flux_total = solve_josh_flux(
-        cont_a,
-        planck,
-        line_a,
-        line_src,
-        cont_s,
-        line_sig,
-        mass,
-        debug=debug_josh,
-        debug_label=f"FLUX_TOTAL_{wavelength_nm:.8f}",
-        temperature=temp,  # Pass temperature for debug output
-    )
-    
-    # CRITICAL DEBUG: Check if flux_total is zero
-    # Check for exactly zero OR very small values
-    if flux_total == 0.0 or abs(flux_total) < 1e-50 or np.isnan(flux_total) or np.isinf(flux_total):
-        print(f"\n{'='*70}")
-        print(f"CRITICAL: flux_total is zero/invalid in solve_lte_frequency!")
-        print(f"{'='*70}")
-        print(f"  Wavelength: {wavelength_nm:.6f} nm")
-        print(f"  flux_total = {flux_total:.8E}")
-        print(f"  cont_a size: {cont_a.size}")
-        print(f"  cont_a[0] = {cont_a[0]:.8E}" if cont_a.size > 0 else "  cont_a is empty")
-        print(f"  planck[0] = {planck[0]:.8E}" if planck.size > 0 else "  planck is empty")
-        print(f"  line_a[0] = {line_a[0]:.8E}" if line_a.size > 0 else "  line_a is empty")
-        print(f"  mass size: {mass.size}")
-        print(f"  mass[0] = {mass[0]:.8E}" if mass.size > 0 else "  mass is empty")
         print(f"{'='*70}\n")
 
     zero_line = np.zeros_like(line_a)
@@ -407,21 +414,76 @@ def solve_lte_frequency(
         temperature=temp,  # Pass temperature for debug output
     )
 
+    # CRITICAL FIX: Fortran spectrv.for passes ACONT (absorption only) to JOSH, not ABTOT
+    # Line 254: ACONT(J) = 10.**(C1*CONTABS(...)) - absorption only
+    # Line 256: SIGMAC(J) = 10.**(C1*CONTSCAT(...)) - scattering only
+    # Line 270: CALL JOSH(IFSCAT,IFSURF) - passes ACONT, SIGMAC handled separately via IFSCAT
+    # Python must match: pass cont_abs (ACONT) only, not cont_abs + cont_scat (ABTOT)
+    # The scattering (cont_s) is passed separately and handled by the JOSH solver internally
+    flux_total = solve_josh_flux(
+        cont_a,  # ACONT only (absorption), NOT ABTOT (absorption + scattering)
+        planck,
+        line_a,
+        line_src,
+        cont_s,  # SIGMAC (scattering) - handled separately by JOSH solver
+        line_sig,
+        mass,
+        debug=debug_josh,
+        debug_label=f"FLUX_TOTAL_{wavelength_nm:.8f}",
+        temperature=temp,  # Pass temperature for debug output
+    )
+
+    # CRITICAL DEBUG: Check if flux_total is zero
+    # Check for exactly zero OR very small values
+    if (
+        flux_total == 0.0
+        or abs(flux_total) < 1e-50
+        or np.isnan(flux_total)
+        or np.isinf(flux_total)
+    ):
+        print(f"\n{'='*70}")
+        print(f"CRITICAL: flux_total is zero/invalid in solve_lte_frequency!")
+        print(f"{'='*70}")
+        print(f"  Wavelength: {wavelength_nm:.6f} nm")
+        print(f"  flux_total = {flux_total:.8E}")
+        print(f"  cont_a size: {cont_a.size}")
+        print(
+            f"  cont_a[0] = {cont_a[0]:.8E}" if cont_a.size > 0 else "  cont_a is empty"
+        )
+        print(
+            f"  planck[0] = {planck[0]:.8E}" if planck.size > 0 else "  planck is empty"
+        )
+        print(
+            f"  line_a[0] = {line_a[0]:.8E}" if line_a.size > 0 else "  line_a is empty"
+        )
+        print(f"  mass size: {mass.size}")
+        print(f"  mass[0] = {mass[0]:.8E}" if mass.size > 0 else "  mass is empty")
+        print(f"{'='*70}\n")
+
     # CRITICAL DEBUG: Check if flux_cont is zero
     # Check for exactly zero OR very small values
-    if flux_cont == 0.0 or abs(flux_cont) < 1e-50 or np.isnan(flux_cont) or np.isinf(flux_cont):
+    if (
+        flux_cont == 0.0
+        or abs(flux_cont) < 1e-50
+        or np.isnan(flux_cont)
+        or np.isinf(flux_cont)
+    ):
         print(f"\n{'='*70}")
         print(f"CRITICAL: flux_cont is zero/invalid in solve_lte_frequency!")
         print(f"{'='*70}")
         print(f"  Wavelength: {wavelength_nm:.6f} nm")
         print(f"  flux_cont = {flux_cont:.8E}")
         print(f"  cont_a size: {cont_a.size}")
-        print(f"  cont_a[0] = {cont_a[0]:.8E}" if cont_a.size > 0 else "  cont_a is empty")
-        print(f"  planck[0] = {planck[0]:.8E}" if planck.size > 0 else "  planck is empty")
+        print(
+            f"  cont_a[0] = {cont_a[0]:.8E}" if cont_a.size > 0 else "  cont_a is empty"
+        )
+        print(
+            f"  planck[0] = {planck[0]:.8E}" if planck.size > 0 else "  planck is empty"
+        )
         print(f"  mass size: {mass.size}")
         print(f"  mass[0] = {mass[0]:.8E}" if mass.size > 0 else "  mass is empty")
         print(f"{'='*70}\n")
-    
+
     return flux_total, flux_cont
 
 
@@ -519,17 +581,38 @@ def solve_lte_spectrum(
 
     # Determine number of workers
     if n_workers is None:
-        n_workers = 1
+        # Use max cores for large grids, sequential for small grids
+        if n_points > 10000:
+            import multiprocessing
+
+            n_workers = max(1, multiprocessing.cpu_count())
+        else:
+            n_workers = 1
     elif n_workers < 1:
         n_workers = 1
 
     # Enable debug for first few wavelengths to compare with Fortran (if debug=False)
     debug_wavelengths = [
-        300.00040572,
-        300.00540576,
-        300.01040589,
-        300.01540609,
-        300.02040638,
+        320.973013,
+        311.304157,
+        317.130618,
+        315.903591,
+        315.904644,
+        317.122162,
+        311.305195,
+        311.303120,
+        319.494605,
+        320.974083,
+        317.131676,
+        320.979432,
+        320.978363,
+        320.971943,
+        311.302082,
+        315.910962,
+        320.975153,
+        317.121105,
+        319.493540,
+        320.977293,
     ]
 
     # Log initial status
@@ -550,7 +633,8 @@ def solve_lte_spectrum(
     for idx in range(n_points):
         wl = wavelength_nm[idx]
         # Use global debug flag, or enable for specific wavelengths if debug=False
-        debug_this = debug or any(abs(wl - dwl) < 0.0001 for dwl in debug_wavelengths)
+        # Use 0.001 nm tolerance to match Fortran print precision and grid rounding.
+        debug_this = debug or any(abs(wl - dwl) < 0.001 for dwl in debug_wavelengths)
         line_src_col = line_source[:, idx] if line_source is not None else None
 
         process_args.append(
@@ -570,11 +654,15 @@ def solve_lte_spectrum(
 
     # Process wavelengths
     if n_workers > 1 and n_points > 100:  # Only parallelize for large grids
-        # Parallel processing
+        # Parallel processing using ThreadPoolExecutor — avoids the overhead of
+        # pickling numpy arrays that ProcessPoolExecutor incurs.  The JOSH
+        # solver's inner Numba kernels (_josh_iteration_kernel, _map1_kernel,
+        # _integ, _parcoe, _deriv) release the GIL, enabling genuine
+        # parallelism for the compute-heavy phases.
         log_interval = max(1, n_points // 100)  # Log every 1%
         completed = 0
 
-        with ProcessPoolExecutor(max_workers=n_workers) as executor:
+        with ThreadPoolExecutor(max_workers=n_workers) as executor:
             # Store wavelength values in a dict for error handling
             idx_to_wavelength = {args[0]: args[1] for args in process_args}
             futures = {
@@ -614,7 +702,10 @@ def solve_lte_spectrum(
         for idx in range(n_points):
             wl = wavelength_nm[idx]
             # Use global debug flag, or enable for specific wavelengths if debug=False
-            debug_this = debug or any(abs(wl - dwl) < 0.0001 for dwl in debug_wavelengths)
+            # Use 0.001 nm tolerance to match Fortran print precision and grid rounding.
+            debug_this = debug or any(
+                abs(wl - dwl) < 0.001 for dwl in debug_wavelengths
+            )
 
             line_src_col = line_source[:, idx] if line_source is not None else None
             ft, fc = solve_lte_frequency(

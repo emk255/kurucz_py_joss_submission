@@ -24,21 +24,16 @@ class LineDataConfig:
     """Controls which line lists are included in the synthesis.
 
     Note: Populations are computed from Saha-Boltzmann equations (no fort.10 dependency).
-    Fortran files (fort.9, fort.19, fort.29) are optional and only used for metadata
-    if provided. Line opacity is computed from first principles using the atomic catalog.
+    Line opacity is computed from first principles using the atomic catalog.
     """
 
     atomic_catalog: Path
     molecular_catalogs: List[Path] = field(default_factory=list)
     include_predicted: bool = False
     cache_directory: Optional[Path] = None
+    allow_tfort_runtime: bool = False
     fort20: Optional[Path] = None  # Deprecated - not used
     fort29: Optional[Path] = None  # Deprecated - wavelength grid built from config
-    fort9: Optional[Path] = None  # Optional - only used for metadata if provided
-    fort19: Optional[Path] = (
-        None  # Optional - only used for special wing profiles if provided
-    )
-    spectrv_input: Optional[Path] = None
 
 
 @dataclass
@@ -75,8 +70,8 @@ class SynthesisConfig:
     log_level: str = "INFO"
     enable_helium_wings: bool = True
     skip_hydrogen_wings: bool = False
+    line_filter: bool = True
     wavelength_subsample: int = 1
-    wavelength_range_filter: Optional[Tuple[float, float]] = None
     n_workers: Optional[int] = (
         None  # Number of parallel workers for radiative transfer (None = auto, 1 = sequential)
     )
@@ -101,17 +96,15 @@ class SynthesisConfig:
         scattering_tolerance: float = 1e-3,
         fort20: Optional[Path] = None,
         fort29: Optional[Path] = None,
-        fort9: Optional[Path] = None,
-        fort19: Optional[Path] = None,
-        spectrv_input: Optional[Path] = None,
         rhoxj_scale: float = 0.0,
         enable_helium_wings: bool = True,
         skip_hydrogen_wings: bool = False,
+        line_filter: bool = True,
         wavelength_subsample: int = 1,
-        wavelength_range_filter: Optional[Tuple[float, float]] = None,
         npz_path: Optional[Path] = None,
         n_workers: Optional[int] = None,
         debug: bool = False,
+        allow_tfort_runtime: bool = False,
     ) -> "SynthesisConfig":
         """Helper for the default CLI entry point."""
 
@@ -125,11 +118,9 @@ class SynthesisConfig:
             ),
             line_data=LineDataConfig(
                 atomic_catalog=atomic_catalog,
+                allow_tfort_runtime=allow_tfort_runtime,
                 fort20=fort20,
                 fort29=fort29,
-                fort9=fort9,
-                fort19=fort19,
-                spectrv_input=spectrv_input,
             ),
             atmosphere=AtmosphereInput(model_path=atmosphere_path, npz_path=npz_path),
             output=OutputConfig(spec_path=spec_path, diagnostics_path=diagnostics_path),
@@ -141,8 +132,8 @@ class SynthesisConfig:
             rhoxj_scale=rhoxj_scale,
             enable_helium_wings=enable_helium_wings,
             skip_hydrogen_wings=skip_hydrogen_wings,
+            line_filter=line_filter,
             wavelength_subsample=wavelength_subsample,
-            wavelength_range_filter=wavelength_range_filter,
             n_workers=n_workers,
             debug=debug,
         )

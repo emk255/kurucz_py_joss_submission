@@ -9,7 +9,10 @@ from pathlib import Path
 
 import numpy as np
 
-from embed_atlas_tables import embed_atlas_tables
+try:
+    from .embed_atlas_tables import embed_atlas_tables
+except ImportError:
+    from embed_atlas_tables import embed_atlas_tables
 
 
 def _read_record(handle) -> bytes:

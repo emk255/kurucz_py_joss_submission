@@ -9,12 +9,8 @@ import struct
 # Add parent directory to path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-from synthe_py.tools.convert_atm_to_npz import (
-    parse_atm_file,
-    _read_fort10_record,
-    extract_xne_from_fort10,
-    extract_xnatom_from_fort10,
-)
+from synthe_py.tools.convert_atm_to_npz import parse_atm_file
+from synthe_py.tools.convert_fort10 import _read_record
 from synthe_py.tools.compute_xne_iterative import compute_xne_iterative
 from synthe_py.tools.pops_exact import load_fortran_data, pfsaha_exact
 
@@ -30,7 +26,7 @@ def read_fort10_state(fort10_path: Path):
         records = []
         while True:
             try:
-                records.append(_read_fort10_record(fh))
+                records.append(_read_record(fh))
             except EOFError:
                 break
     

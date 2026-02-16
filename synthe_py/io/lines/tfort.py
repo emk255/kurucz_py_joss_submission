@@ -124,6 +124,47 @@ class Tape14Record:
     n_upper: Optional[int]
 
 
+@dataclass
+class Tape12Record:
+    nbuff: int
+    cgf: float
+    nelion: int
+    elo_cm: float
+    gamma_rad: float
+    gamma_stark: float
+    gamma_vdw: float
+
+
+def _iter_tape12(path: Path) -> Iterator[Tape12Record]:
+    record_len = 7 * 4  # int, float, int, float, float, float, float
+    with path.open("rb") as handle:
+        while True:
+            header = handle.read(4)
+            if not header:
+                break
+            (payload_len,) = struct.unpack("<i", header)
+            payload = handle.read(payload_len)
+            trailer = handle.read(4)
+            if len(payload) != payload_len or len(trailer) != 4:
+                raise ValueError("Truncated tape-12 record")
+            if payload_len != record_len:
+                raise ValueError(
+                    f"Unexpected tape-12 record length {payload_len} (expected {record_len})"
+                )
+            nbuff, cgf, nelion, elo, gamma_r, gamma_s, gamma_w = struct.unpack(
+                "<ififfff", payload
+            )
+            yield Tape12Record(
+                nbuff=int(nbuff),
+                cgf=float(cgf),
+                nelion=int(nelion),
+                elo_cm=float(elo),
+                gamma_rad=float(gamma_r),
+                gamma_stark=float(gamma_s),
+                gamma_vdw=float(gamma_w),
+            )
+
+
 def _iter_tape14(path: Path) -> Iterator[Tape14Record]:
     record_len = 14 * 8 + 28 * 4
     with path.open("rb") as handle:
@@ -176,11 +217,11 @@ def _iter_tape14(path: Path) -> Iterator[Tape14Record]:
 
             # Use the exponentiated values if raw rates are zero
             if gamma_rad <= 0.0 and gamma_r_log != 0.0:
-                gamma_rad = 10.0 ** gamma_r_log
+                gamma_rad = 10.0**gamma_r_log
             if gamma_stark <= 0.0 and gamma_s_log != 0.0:
-                gamma_stark = 10.0 ** gamma_s_log
+                gamma_stark = 10.0**gamma_s_log
             if gamma_vdw <= 0.0 and gamma_w_log != 0.0:
-                gamma_vdw = 10.0 ** gamma_w_log
+                gamma_vdw = 10.0**gamma_w_log
 
             nelem = int(code + 1e-6)
             frac = code - nelem
@@ -196,7 +237,7 @@ def _iter_tape14(path: Path) -> Iterator[Tape14Record]:
                 wavelength_air=float(doubles[0]),
                 excitation_energy_cm=float(excitation),
                 log_gf=float(log_gf),
-                gf=float(gf) if gf > 0.0 else float(10.0 ** log_gf),
+                gf=float(gf) if gf > 0.0 else float(10.0**log_gf),
                 gamma_rad=float(gamma_rad),
                 gamma_stark=float(gamma_stark),
                 gamma_vdw=float(gamma_vdw),
@@ -211,6 +252,44 @@ def parse_tfort14(path: Path) -> Iterable[Tape14Record]:
     return list(_iter_tape14(path))
 
 
+def parse_tfort12(path: Path) -> Iterable[Tape12Record]:
+    return list(_iter_tape12(path))
+
+
+@dataclass
+class Tape93Record:
+    wlbeg: float
+    wlend: float
+    resolution: float
+    ratio: float
+    ratiolg: float
+    cutoff: float
+
+
+def parse_tfort93(path: Path) -> Tape93Record:
+    with path.open("rb") as handle:
+        header = handle.read(4)
+        if not header:
+            raise ValueError("Empty tape-93 file")
+        (payload_len,) = struct.unpack("<i", header)
+        payload = handle.read(payload_len)
+        trailer = handle.read(4)
+        if len(payload) != payload_len or len(trailer) != 4:
+            raise ValueError("Truncated tape-93 record")
+        # Last 6 doubles store WLBEG, WLEND, RESOLU, RATIO, RATIOLG, CUTOFF.
+        wlbeg, wlend, resolu, ratio, ratiolg, cutoff = struct.unpack_from(
+            "<6d", payload, payload_len - 48
+        )
+        return Tape93Record(
+            wlbeg=float(wlbeg),
+            wlend=float(wlend),
+            resolution=float(resolu),
+            ratio=float(ratio),
+            ratiolg=float(ratiolg),
+            cutoff=float(cutoff),
+        )
+
+
 def find_companion_tape14(source: Path) -> Optional[Path]:
     if source.suffix == ".14":
         return source
@@ -222,5 +301,3 @@ def find_companion_tape14(source: Path) -> Optional[Path]:
         if candidate_alt.exists():
             return candidate_alt
     return None
-
-
