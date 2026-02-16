@@ -1,240 +1,140 @@
-# Kurucz Stellar Synthesis Pipeline
+# Kurucz Validation Workflow
 
-This repository contains both the original **Kurucz Fortran code** for stellar atmosphere synthesis and a **Python reimplementation** (`synthe_py`) that aims to achieve sub-percent accuracy with the Fortran implementation.
+This repo runs a practical Fortran-vs-Python validation loop on `samples/*.atm`.
 
-## Overview
+## Current Workflow
 
-This project stems from the existing Kurucz Fortran synthesis code (located in `src/` and related directories) and provides a modern Python reimplementation that computes stellar spectra from first principles, matching Fortran's physics exactly. The Python implementation is designed to be:
+1. Compile Fortran once.
+2. For each atmosphere file:
+   - Fortran run -> `results/validation_100/fortran_specs/<name>.spec`
+   - Python run (`convert_atm_to_npz.py` + `synthe_py.cli`) ->
+     - `results/validation_100/python_npz/<name>.npz`
+     - `results/validation_100/python_specs/<name>.spec`
+3. Inspect differences with `plot.py`.
 
-- **Self-contained**: No reliance on Fortran-generated intermediate files
-- **Accurate**: Sub-percent (<1%) agreement with Fortran results
-- **Verifiable**: Direct comparison tools for validation
+Default validation settings:
 
-## Directory Structure
+- Wavelength: `300` to `1800` nm
+- Resolution: `300000`
 
-```
+## Directory Structure (Relevant)
+
+```text
 kurucz/
-├── src/                    # Original Kurucz Fortran source code
-│   ├── atlas7v.for        # ATLAS atmosphere code
-│   ├── xnfpelsyn.for      # Population/continuum computation
-│   ├── spectrv.for         # Spectrum synthesis
-│   ├── synthe.for          # Line synthesis
-│   └── Makefile            # Fortran build configuration
-│
-├── bin/                    # Compiled Fortran executables
-│   ├── xnfpelsyn.exe
-│   ├── spectrv.exe
-│   ├── synthe.exe
-│   └── ...
-│
-├── synthe/                 # Fortran synthesis workflow
-│   ├── synthe.sh           # Main Fortran synthesis script
-│   ├── synthe_debug.sh     # Debug version with output capture
-│   ├── stmp_*/             # Temporary working directories
-│   └── Lines_v5_PL/        # Line list data files
-│
-├── synthe_py/              # Python reimplementation
-│   ├── __main__.py         # CLI entry point
-│   ├── cli.py              # Command-line interface
-│   ├── engine/             # Core synthesis engine
-│   │   ├── opacity.py      # Opacity computation
-│   │   ├── radiative.py    # Radiative transfer
-│   │   └── transport.py    # Transport solver
-│   ├── io/                 # Input/output handling
-│   │   ├── atmosphere.py   # Atmosphere model loading
-│   │   ├── lines/          # Line list parsing
-│   │   └── export.py       # Spectrum export
-│   ├── physics/            # Physics modules
-│   │   ├── kapp.py         # Continuum opacity (KAPP)
-│   │   └── ...             # Other physics routines
-│   ├── tools/              # Utility tools
-│   │   ├── convert_atm_to_npz.py  # Convert .atm to NPZ format
-│   │   ├── compare_spectra.py      # Compare Python vs Fortran
-│   │   └── ...             # Other tools
-│   └── data/               # Precomputed data tables (.npz)
-│
-├── grids/                  # Atmosphere model grids
-│   └── at12_aaaaa/         # Example grid
-│       ├── *.atm           # Atmosphere files
-│       └── spec/           # Fortran-generated spectra
-│
-├── lines/                  # Line list data files
-│   ├── gfallvac.latest     # Atomic line list
-│   ├── molecules.dat       # Molecular data
-│   ├── continua.dat        # Continuum edges
-│   └── he1tables.dat       # Helium tables
-│
-├── compile_fortran.sh      # Compile Fortran code
-├── run_fortran_with_debug.sh  # Run Fortran with debug output
-├── plot.py                 # Visualization tool
-└── tests/                  # Test files
+├── bin/                         # Fortran executables
+├── lines/                       # continua.dat, molecules.dat, gfallvac.latest, ...
+├── samples/                     # Input atmospheres (*.atm)
+├── synthe/Lines_v5_PL/          # Prebuilt Fortran tfort.* bundle
+├── synthe_py/                   # Python pipeline
+├── compile_fortran.sh
+├── run_fortran_atm.sh
+├── run_validation_100.sh
+├── plot.py
+└── results/validation_100/
+    ├── fortran_specs/
+    ├── python_npz/
+    ├── python_specs/
+    └── logs/
 ```
 
-## Requirements
-
-### Fortran Compilation
-
-- **Intel Fortran** (`ifort`) or **GNU Fortran** (`gfortran`)
-- For Intel Fortran: Intel oneAPI HPC Toolkit
-- For GNU Fortran: `brew install gcc` (macOS) or system package manager
-
-### Python
-
-- Python 3.8+
-- Required packages: `numpy`, `scipy`, `numba`, `matplotlib`
-- See `synthe_py/` for full dependency list
-
-## Fortran Workflow
-
-### 1. Compile Fortran Code
+## 1) Build Fortran
 
 ```bash
+cd /Users/ElliotKim/Desktop/Research/kurucz
 ./compile_fortran.sh
 ```
 
-This script:
+## 2) Run Validation
 
-- Detects available Fortran compiler (Intel or GNU)
-- Compiles `atlas7v.for` and related source files
-- Produces executables in `bin/`
-
-### 2. Run Fortran Synthesis
+Run all samples:
 
 ```bash
-./run_fortran_with_debug.sh <model_name>
+cd /Users/ElliotKim/Desktop/Research/kurucz
+./run_validation_100.sh -n all
 ```
 
-Example:
+Run one sample:
 
 ```bash
-./run_fortran_with_debug.sh at12_aaaaa
+cd /Users/ElliotKim/Desktop/Research/kurucz
+./run_validation_100.sh -n 1 --atm at12_aaaaa_t02500g-1.0.atm
 ```
 
-This script:
+Resume behavior is automatic:
 
-- Runs the complete Fortran synthesis pipeline
-- Captures debug output to `fortran_debug_<model>.log`
-- Generates spectra in `grids/<model>/spec/`
+- skips Fortran if output spec already exists
+- skips Python if output spec already exists
 
-The Fortran workflow processes `.atm` atmosphere files through:
-
-1. `xnfpelsyn.exe` - Computes populations and continuum opacities
-2. `synthe.exe` - Synthesizes spectral lines
-3. `spectrv.exe` - Performs radiative transfer
-
-## Python Workflow
-
-### 1. Convert Atmosphere File to NPZ Format
-
-Convert a `.atm` file to the NPZ format used by the Python pipeline:
+## 3) Python-Only Pipeline
 
 ```bash
-python synthe_py/tools/convert_atm_to_npz.py \
-    grids/at12_aaaaa/atm/at12_aaaaa_t03750g3.50.atm \
-    output.npz
+cd /Users/ElliotKim/Desktop/Research/kurucz
+python3 synthe_py/tools/convert_atm_to_npz.py \
+  samples/at12_aaaaa_t02500g-1.0.atm \
+  results/validation_100/python_npz/at12_aaaaa_t02500g-1.0.npz \
+  --atlas-tables synthe_py/data/atlas_tables.npz
+
+python3 -m synthe_py.cli \
+  samples/at12_aaaaa_t02500g-1.0.atm \
+  lines/gfallvac.latest \
+  --npz results/validation_100/python_npz/at12_aaaaa_t02500g-1.0.npz \
+  --spec results/validation_100/python_specs/at12_aaaaa_t02500g-1.0.spec \
+  --wl-start 300 --wl-end 1800 \
+  --resolution 300000 \
+  --n-workers "$(python3 -c 'import os; print(os.cpu_count() or 1)')" \
+  --cache synthe_py/out/line_cache \
+  --log-level INFO
 ```
 
-This tool automatically finds required data files (`atlas_tables.npz`, `continua.dat`, `molecules.dat`) in standard locations. It:
+Diagnostics are opt-in only. If `--diagnostics` is not passed, no diagnostics NPZ is written by `synthe_py.cli`.
 
-- Parses the `.atm` file
-- Computes populations using exact POPS/PFSAHA implementation
-- Computes continuum opacities using KAPP
-- Generates Doppler broadening coefficients
-- Outputs a complete NPZ file ready for synthesis
+## Caching (Python Line Data)
 
-### 2. Run Python Synthesis
+Python synthesis uses two line-data cache layers:
 
-Use the CLI pipeline to synthesize a spectrum. You can use either a `.atm` file directly (with `--npz` to specify the NPZ output) or a pre-converted `.npz` file:
+- Parsed cache: stores parsed `gfallvac.latest` arrays (base parse cache).
+- Compiled cache: stores runtime-ready compiled line arrays.
+
+Cache location is controlled by `--cache` in `synthe_py.cli` (the validation script uses `synthe_py/out/line_cache`).
+
+What affects cache reuse:
+
+- Parsed cache key: source file fingerprint + cache logic version.
+- Compiled cache key: source fingerprint plus `wlbeg`, `wlend`, `resolution`, and `line_filter`.
+
+So if you change wavelength range or resolution, compiled cache entries are regenerated for those settings.
+
+To disable caches explicitly:
 
 ```bash
-python -m synthe_py \
-    grids/at12_aaaaa/atm/at12_aaaaa_t03750g3.50.atm \
-    lines/gfallvac.latest \
-    --npz output.npz \
-    --wl-range 300:1800 \
-    --spec spectrum.spec
+PY_DISABLE_PARSED_CACHE=1 PY_DISABLE_COMPILED_CACHE=1 python3 -m synthe_py.cli ...
 ```
 
-Or with a pre-converted NPZ file:
+## 4) Plot Spectra
+
+Default (uses built-in defaults in `plot.py`):
 
 ```bash
-python -m synthe_py \
-    output.npz \
-    lines/gfallvac.latest \
-    --wl-range 300:1800 \
-    --spec spectrum.spec
+cd /Users/ElliotKim/Desktop/Research/kurucz
+python3 plot.py
 ```
 
-Key arguments:
-
-- First argument - Atmosphere model (`.atm` or `.npz` file)
-- Second argument - Atomic line list (e.g., `lines/gfallvac.latest`)
-- `--npz` - Output NPZ file (only needed when using `.atm` input)
-- `--spec` - Output spectrum file
-- `--wl-range` - Wavelength range as `start:end` (nm)
-
-## Comparison and Evaluation
-
-### Compare Spectra
-
-Compare Python and Fortran spectra:
+By atmosphere name:
 
 ```bash
-python synthe_py/tools/compare_spectra.py \
-    synthe_py/out/test_fixed_3750.spec \
-    grids/at12_aaaaa/spec/at12_aaaaa_t03750g3.50.spec
+python3 plot.py --atmosphere at12_aaaaa_t04250g2.50.spec
 ```
 
-This tool:
-
-- Loads both spectrum files
-- Interpolates to common wavelength grid
-- Computes relative differences (mean, median, RMS)
-- Reports sub-percent accuracy status
-
-### Visualize Spectra
-
-Use `plot.py` to visualize and compare spectra:
+Explicit file paths:
 
 ```bash
-python plot.py
+python3 plot.py \
+  --python-spec results/validation_100/python_specs/at12_aaaaa_t04250g2.50.spec \
+  --fortran-spec results/validation_100/fortran_specs/at12_aaaaa_t04250g2.50.spec \
+  --wl-start 300 --wl-end 1800
 ```
-
-Edit `plot.py` to set paths to your spectrum files. The script creates side-by-side plots of normalized spectra.
-
-## Accuracy Goals
-
-The Python implementation targets **sub-percent (<1%) accuracy** with Fortran for:
-
-- Continuum flux at all wavelengths
-- Total flux (including spectral lines)
-- All stellar temperature regimes (2500K - 10000K+)
-
-See `SYNTHESIS_ACCURACY_PROGRESS.md` for detailed progress tracking and bug fixes.
-
-## Key Features
-
-### Python Implementation (`synthe_py`)
-
-- **Exact POPS/PFSAHA**: Population computation matching Fortran exactly
-- **Full KAPP**: Continuum opacity computation with all sources (H, He, metals, molecules)
-- **NMOLEC**: Molecular equilibrium for cool stars
-- **Line Synthesis**: Complete line opacity and radiative transfer
-- **No Fortran Dependencies**: Computes everything from first principles
-
-### Fortran Code (`src/`)
-
-- Original Kurucz synthesis code
-- Reference implementation for validation
-- Used for generating ground-truth spectra
 
 ## Notes
 
-- The Python implementation is designed to match Fortran physics exactly, not to improve upon it
-- All physics constants and algorithms are matched to Fortran values
-- Debug output from both implementations can be compared for detailed validation
-- The NPZ format stores precomputed populations, opacities, and coefficients for efficient synthesis
-
-## License
-
-This repository contains Kurucz Fortran code (see original Kurucz distribution for licensing) and a Python reimplementation. Please refer to individual source files for licensing information.
+- Current Fortran validation path uses prebuilt `synthe/Lines_v5_PL/tfort.*` files.
+- Legacy debug scripts are not required for this current flow.

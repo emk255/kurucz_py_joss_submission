@@ -156,8 +156,6 @@ def main(argv: Optional[list[str]] = None) -> int:
     args = parser.parse_args(argv)
 
     diagnostics_path = args.diagnostics
-    if diagnostics_path is None and args.spec is not None:
-        diagnostics_path = args.spec.with_suffix(".npz")
 
     # Parse wavelength range if provided
     cfg = config.SynthesisConfig.from_cli(
