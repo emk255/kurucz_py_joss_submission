@@ -134,6 +134,36 @@ python3 plot.py \
   --wl-start 300 --wl-end 1800
 ```
 
+## 5) Compare Spectra (Text Metrics)
+
+Use `synthe_py/tools/compare_spectra.py` to compute numeric agreement metrics.
+
+Basic comparison:
+
+```bash
+cd /Users/ElliotKim/Desktop/Research/kurucz
+python3 synthe_py/tools/compare_spectra.py \
+  results/validation_100/python_specs/at12_aaaaa_t04250g2.50.spec \
+  results/validation_100/fortran_specs/at12_aaaaa_t04250g2.50.spec
+```
+
+Restricted range with top outliers:
+
+```bash
+python3 synthe_py/tools/compare_spectra.py \
+  results/validation_100/python_specs/at12_aaaaa_t04250g2.50.spec \
+  results/validation_100/fortran_specs/at12_aaaaa_t04250g2.50.spec \
+  --range 300 1800 \
+  --top 20
+```
+
+What it reports:
+
+- Flux mean / median / RMS relative difference (%)
+- Continuum mean / median / RMS relative difference (%)
+- Normalized flux RMS (`F/C`)
+- Optional top-N fractional flux outlier wavelengths
+
 ## Notes
 
 - Current Fortran validation path uses prebuilt `synthe/Lines_v5_PL/tfort.*` files.
