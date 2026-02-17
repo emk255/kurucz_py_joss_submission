@@ -176,9 +176,3 @@ def write_tfort20(output_path: Path, catalog: atomic.LineCatalog) -> None:
             # floats[20:] ALINE left as zeros for compatibility/debug.
             struct.pack_into("<28f", payload, 14 * 8, *floats)
             _write_unformatted_record(fh, bytes(payload))
-
-
-
-
-
-

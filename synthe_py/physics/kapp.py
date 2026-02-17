@@ -22,6 +22,10 @@ import numpy as np
 
 # Debug output flags (controlled via environment variables)
 _TRACE_KAPP = os.environ.get("NM_TRACE_KAPP", "").strip().lower() in ("1", "true")
+_SCALE_HMINFF = float(os.environ.get("PY_SCALE_HMINFF", "1.0"))
+_SCALE_HRAYOP = float(os.environ.get("PY_SCALE_HRAYOP", "1.0"))
+_SCALE_H2RAOP = float(os.environ.get("PY_SCALE_H2RAOP", "1.0"))
+_SCALE_ELECOP = float(os.environ.get("PY_SCALE_ELECOP", "1.0"))
 
 from .karsas_tables import xkarsas
 from .hydrogen_wings import compute_hydrogen_continuum
@@ -6906,6 +6910,33 @@ def compute_kapp_continuum(
             ahe2[:, j] = h
             she2[:, j] = np.where(h > 0, s / h, bnu_j)
 
+    # HEMIOP: He- opacity (atlas7v.for line 7296-7318)
+    # Fortran evidence:
+    #   AHEMIN(J)=(A*T(J)+B+C/T(J))/1.D15*XNE(J)/1.D15*XNFPHE(J,1)/1.D15/RHO(J)
+    # where A, B, C are frequency-dependent polynomials in 1/FREQ.
+    if ifop[6] == 1 and atmosphere.xnf_he1 is not None and atmosphere.electron_density is not None:
+        logger.info("Computing HEMIOP (He- opacity)...")
+        xnfphe = np.asarray(atmosphere.xnf_he1, dtype=np.float64)
+        if xnfphe.ndim == 1:
+            xnfphe = xnfphe[:, np.newaxis]
+        xnfphe1 = xnfphe[:, 0] if xnfphe.shape[1] > 0 else np.ones(n_layers)
+        xne = np.asarray(atmosphere.electron_density, dtype=np.float64)
+
+        for j in range(nfreq):
+            f = freq[j]
+            a_coeff = 3.397e-01 + (-5.216e14 + 7.039e30 / f) / f
+            b_coeff = -4.116e03 + (1.067e19 + 8.135e34 / f) / f
+            c_coeff = 5.081e08 + (-8.724e22 - 5.659e37 / f) / f
+            ahemin[:, j] = (
+                (a_coeff * temp + b_coeff + c_coeff / temp)
+                / 1.0e15
+                * xne
+                / 1.0e15
+                * xnfphe1
+                / 1.0e15
+                / rho
+            )
+
     # TODO: Complete HE1OP implementation (all 29 levels)
     # HMINOP: H- opacity (atlas7v.for line 5212-5316)
     if atmosphere.xnfph is not None and atmosphere.electron_density is not None:
@@ -6998,7 +7029,7 @@ def compute_kapp_continuum(
 
             # Compute H- opacity (atlas7v.for line 5309-5313)
             # HMINFF = FFTETA * XNFPH(J,1) * 2. * BHYD(J,1) * XNE(J) / RHO(J) * 1e-26
-            hminff = fftheta * xnfph1 * 2.0 * bhyd1 * xne / rho * 1e-26
+            hminff = _SCALE_HMINFF * fftheta * xnfph1 * 2.0 * bhyd1 * xne / rho * 1e-26
 
             # H = HMINBF * 1e-18 * (1. - EHVKT(J)/BMIN(J)) * XHMIN(J) / RHO(J)
             h_bf = (
@@ -7049,7 +7080,7 @@ def compute_kapp_continuum(
         xne = np.asarray(atmosphere.electron_density, dtype=np.float64)
         for j in range(nfreq):
             # SIGEL = 0.6653e-24 * XNE / RHO (atlas7v.for line 7815)
-            sigel[:, j] = 0.6653e-24 * xne / rho
+            sigel[:, j] = _SCALE_ELECOP * 0.6653e-24 * xne / rho
 
     # HRAYOP: Hydrogen Rayleigh scattering (atlas7v.for line 5332-5482)
     # CRITICAL FIX: Fortran uses XNFPH(J,1) which is GROUND-STATE hydrogen population,
@@ -7205,7 +7236,7 @@ def compute_kapp_continuum(
             xsect = 6.65e-25 * g**2
 
             # SIGH = XSECT * XNFPH(J,1) * 2. * BHYD(J,1) / RHO(J) (atlas7v.for line 5480)
-            sigh[:, j] = xsect * xnfph1 * 2.0 * bhyd1 / rho
+            sigh[:, j] = _SCALE_HRAYOP * xsect * xnfph1 * 2.0 * bhyd1 / rho
 
     # HERAOP: Helium Rayleigh scattering (atlas7v.for line 5818-5832)
     # CRITICAL: Fortran only calls HERAOP if IFOP(8) == 1 (atlas7v.for line 4046)
@@ -7282,7 +7313,7 @@ def compute_kapp_continuum(
             # Cross-section formula (atlas7v.for line 6847)
             sig = (8.14e-13 + 1.28e-6 / ww + 1.61 / (ww * ww)) / (ww * ww)
 
-            sigh2[:, j] = sig * xnh2
+            sigh2[:, j] = _SCALE_H2RAOP * sig * xnh2
 
         logger.info(f"  SIGH2[0] at first freq: {sigh2[0, 0]:.6e}")
     else:
@@ -8357,6 +8388,10 @@ def compute_kapp_continuum(
                     f"AFE1={afe1[depth_idx, wl_idx]:.6e} "
                     f"ACONT={acont[depth_idx, wl_idx]:.6e} "
                     f"SIGMAC={sigmac_val:.6e} "
+                    f"SIGH={sigh[depth_idx, wl_idx]:.6e} "
+                    f"SIGHE={sighe[depth_idx, wl_idx]:.6e} "
+                    f"SIGEL={sigel[depth_idx, wl_idx]:.6e} "
+                    f"SIGH2={sigh2[depth_idx, wl_idx]:.6e} "
                     f"XNFPH1={xnfph1_debug:.6e} XNE={xne_debug:.6e} "
                     f"RHO={rho_debug:.6e} BMIN={bmin_debug:.6e} BHYD1={bhyd1_debug:.6e}"
                 )

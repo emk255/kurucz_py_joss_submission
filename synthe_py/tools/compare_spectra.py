@@ -3,21 +3,28 @@
 
 import argparse
 from pathlib import Path
+import re
 import sys
 from typing import cast
 
 import numpy as np
 
+FLOAT_RE = re.compile(r"[+-]?(?:\d+\.\d*|\.\d+|\d+)(?:[Ee][+-]?\d+)?")
+
 
 def load_spectrum(filepath: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Load spectrum file with wavelength, flux, continuum columns."""
+    """Load spectrum file with wavelength, flux, continuum columns.
+
+    Uses regex tokenization so Fortran glued fields (e.g. "304.85-0.17E-15")
+    are parsed correctly.
+    """
     wavelengths: list[float] = []
     fluxes: list[float] = []
     continua: list[float] = []
 
     with open(filepath, "r") as f:
         for line in f:
-            parts = line.split()
+            parts = FLOAT_RE.findall(line)
             if len(parts) >= 3:
                 try:
                     wl = float(parts[0])
@@ -81,16 +88,23 @@ def compare_spectra(
     n_points = len(py_wl_common)
     print(f"Comparing {n_points} wavelength points")
 
-    # Relative differences in percent (avoid division by zero)
-    flux_rel = np.where(
-        np.abs(ft_flux_interp) > 1e-30,
-        100 * (py_flux_common - ft_flux_interp) / ft_flux_interp,
-        0,
+    # Relative differences in percent with explicit masked divide to avoid
+    # divide-by-zero warnings and unstable tiny-denominator points.
+    flux_rel = np.zeros_like(py_flux_common)
+    flux_denom_mask = np.abs(ft_flux_interp) > 1e-30
+    np.divide(
+        100 * (py_flux_common - ft_flux_interp),
+        ft_flux_interp,
+        out=flux_rel,
+        where=flux_denom_mask,
     )
-    cont_rel = np.where(
-        np.abs(ft_cont_interp) > 1e-30,
-        100 * (py_cont_common - ft_cont_interp) / ft_cont_interp,
-        0,
+    cont_rel = np.zeros_like(py_cont_common)
+    cont_denom_mask = np.abs(ft_cont_interp) > 1e-30
+    np.divide(
+        100 * (py_cont_common - ft_cont_interp),
+        ft_cont_interp,
+        out=cont_rel,
+        where=cont_denom_mask,
     )
 
     # Normalized flux (flux / continuum)
@@ -101,6 +115,14 @@ def compare_spectra(
     # Compute summary statistics
     flux_rms = np.sqrt(np.mean(flux_rel**2))
     cont_rms = np.sqrt(np.mean(cont_rel**2))
+    cont_scale = float(np.median(np.abs(ft_cont_interp)))
+    robust_flux_threshold = max(1e-30, 1e-3 * cont_scale)
+    robust_flux_mask = np.abs(ft_flux_interp) > robust_flux_threshold
+    flux_rms_robust = (
+        float(np.sqrt(np.mean(flux_rel[robust_flux_mask] ** 2)))
+        if np.any(robust_flux_mask)
+        else float("nan")
+    )
 
     print("\n" + "=" * 60)
     print("SPECTRUM COMPARISON SUMMARY")
@@ -109,6 +131,10 @@ def compare_spectra(
     print("-" * 56)
     print(
         f"{'Flux':<20} {np.mean(flux_rel):+.2f}%{'':<5} {np.median(flux_rel):+.2f}%{'':<5} {flux_rms:.2f}%"
+    )
+    print(
+        f"{'Flux (robust)':<20} {np.mean(flux_rel[robust_flux_mask]):+.2f}%{'':<5} "
+        f"{np.median(flux_rel[robust_flux_mask]):+.2f}%{'':<5} {flux_rms_robust:.2f}%"
     )
     print(
         f"{'Continuum':<20} {np.mean(cont_rel):+.2f}%{'':<5} {np.median(cont_rel):+.2f}%{'':<5} {cont_rms:.2f}%"
@@ -121,7 +147,15 @@ def compare_spectra(
     # Status check
     cont_status = "✅" if cont_rms < 1.0 else "❌"
     flux_status = "✅" if flux_rms < 1.0 else "❌"
-    print(f"Sub-percent accuracy: Continuum {cont_status}  Flux {flux_status}")
+    flux_status_robust = "✅" if flux_rms_robust < 1.0 else "❌"
+    print(
+        f"Sub-percent accuracy: Continuum {cont_status}  Flux {flux_status}  "
+        + f"Flux(robust) {flux_status_robust}"
+    )
+    print(
+        f"Robust flux uses |Fortran flux| > {robust_flux_threshold:.3e} "
+        + f"({np.sum(robust_flux_mask)} / {len(robust_flux_mask)} points)"
+    )
     print("=" * 60)
 
     if top_n and top_n > 0:
@@ -145,6 +179,7 @@ def compare_spectra(
         "flux_mean_rel": np.mean(flux_rel),
         "flux_median_rel": np.median(flux_rel),
         "flux_rms_rel": flux_rms,
+        "flux_rms_rel_robust": flux_rms_robust,
         "cont_mean_rel": np.mean(cont_rel),
         "cont_median_rel": np.median(cont_rel),
         "cont_rms_rel": cont_rms,

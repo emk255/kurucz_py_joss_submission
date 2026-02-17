@@ -75,7 +75,9 @@ def _align_tfort12(
     return py_aligned, gt_aligned
 
 
-def _grid_params(wlbeg: float, wlend: float, resolution: float) -> tuple[float, float, float, float, float]:
+def _grid_params(
+    wlbeg: float, wlend: float, resolution: float
+) -> tuple[float, float, float, float, float]:
     ratio = 1.0 + 1.0 / resolution
     rlog = math.log(ratio)
     ixwlbeg = math.floor(math.log(wlbeg) / rlog)
@@ -97,7 +99,9 @@ def _t12_dict_from_records(records: list[tfort.Tape12Record]) -> dict[str, np.nd
     }
 
 
-def _subset_dict(data: dict[str, np.ndarray], mask: np.ndarray) -> dict[str, np.ndarray]:
+def _subset_dict(
+    data: dict[str, np.ndarray], mask: np.ndarray
+) -> dict[str, np.ndarray]:
     return {k: v[mask] for k, v in data.items()}
 
 
@@ -210,7 +214,9 @@ def _align_fort19(
     return py_aligned, gt_aligned, stats
 
 
-def _fort19_key(value_wl: float, value_ion: int, value_nlo: int, value_nup: int, value_gf: float) -> tuple[float, int, int, int, float]:
+def _fort19_key(
+    value_wl: float, value_ion: int, value_nlo: int, value_nup: int, value_gf: float
+) -> tuple[float, int, int, int, float]:
     return (
         round(float(value_wl), 8),
         int(value_ion),
@@ -220,7 +226,9 @@ def _fort19_key(value_wl: float, value_ion: int, value_nlo: int, value_nup: int,
     )
 
 
-def _fort19_set_stats(py19: fort19_io.Fort19Data, gt19: fort19_io.Fort19Data) -> dict[str, object]:
+def _fort19_set_stats(
+    py19: fort19_io.Fort19Data, gt19: fort19_io.Fort19Data
+) -> dict[str, object]:
     py_keys = {
         _fort19_key(wl, ion, nlo, nup, gf)
         for wl, ion, nlo, nup, gf in zip(
@@ -397,7 +405,9 @@ def run_parity(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Compare Python metadata to tfort ground truth")
+    parser = argparse.ArgumentParser(
+        description="Compare Python metadata to tfort ground truth"
+    )
     parser.add_argument("--gfall", type=Path, required=True)
     parser.add_argument("--tfort12", type=Path, required=True)
     parser.add_argument("--tfort19", type=Path, required=True)
@@ -425,5 +435,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
-

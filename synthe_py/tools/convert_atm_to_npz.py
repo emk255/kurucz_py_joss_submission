@@ -2362,9 +2362,11 @@ if __name__ == "__main__":
     # NELECT-converged mass density.  Previously, Python computed the continuum with
     # the old (atomic) mass_density, introducing a ~6 % bias for cool stars.
     if nmolec_success:
+        derived["electron_density"] = nmolec_xne_result.copy()
         derived["xnatm"] = nmolec_xnatm_result.copy()
         derived["mass_density"] = nmolec_mass_density_result.copy()
         print(f"  Applied NELECT/NMOLEC corrections before continuum computation:")
+        print(f"    XNE[0]    = {derived['electron_density'][0]:.6e}")
         print(f"    XNATOM[0] = {derived['xnatm'][0]:.6e}")
         print(f"    RHO[0]    = {derived['mass_density'][0]:.6e}")
 
@@ -2382,8 +2384,13 @@ if __name__ == "__main__":
             args.atlas_tables,
             xnf_h=xnfh_mode12,  # mode=12 for HRAYOP
             xnfph_h=xnf_h_basic,  # mode=11 for HOP
-            xnf_he1=xnfhe1_mode12,  # mode=12 for HERAOP
-            xnf_he2=xnfhe2_mode12,  # mode=12 for HERAOP
+            # Fortran KAPP helium opacity routines use XNFPHE from POPS(...,11):
+            #   HE1OP  (atlas7v.for line 7193): H = H * XNFPHE(J,1) / RHO(J)
+            #   HEMIOP (atlas7v.for line 7312): ... * XNFPHE(J,1) / ... / RHO(J)
+            #   HERAOP (atlas7v.for line 7292): SIGHE = ... * XNFPHE(J,1) * BHE1(J,1) / RHO(J)
+            # so pass mode=11 populations here (not mode=12 totals).
+            xnf_he1=xnf_he1_basic,  # mode=11 (XNFPHE[:,1]) for He continuum/scattering
+            xnf_he2=xnf_he2_basic,  # mode=11 (XNFPHE[:,2]) for He continuum/scattering
             xnf_h2=xnf_h2,  # Molecular H2 (for storage in NPZ)
             xnf_h_ion=xnf_h2_basic,  # CRITICAL: H II (ionized H) for H2PLOP
             # CRITICAL: Metal populations for UV bound-free opacities
@@ -2762,15 +2769,13 @@ if __name__ == "__main__":
         # (They were already applied before continuum computation above,
         #  but repeat here for safety in case the block order is changed.)
         derived["xnatm"] = nmolec_xnatm_result.copy()
-        # CRITICAL: Do NOT overwrite XNE from .atm file!
-        # The .atm file XNE was computed by Fortran's ATLAS/NMOLEC and is correct.
-        # Python's NMOLEC computes ~1.7× higher XNE which causes ACONT errors.
-        # Keep the original .atm XNE for accurate continuum opacities.
-        # derived["electron_density"] = nmolec_xne_result.copy()  # DISABLED
+        # Keep XNATOM, XNE, and RHO from the same NMOLEC/NELECT solution to
+        # avoid internally inconsistent state in downstream continuum physics.
+        derived["electron_density"] = nmolec_xne_result.copy()
         derived["mass_density"] = nmolec_mass_density_result.copy()
         print("  Confirmed NELECT/NMOLEC corrections in derived dict.")
         print(
-            f"    XNE[0] = {derived['electron_density'][0]:.6e} cm⁻³ (kept from .atm, NOT overwritten)"
+            f"    XNE[0] = {derived['electron_density'][0]:.6e} cm⁻³ (from NMOLEC/NELECT)"
         )
         print(f"    Final XNATOM[0] = {derived['xnatm'][0]:.6e} cm⁻³")
 
@@ -2871,6 +2876,11 @@ if __name__ == "__main__":
         "mass_density": derived["mass_density"],
         "turbulent_velocity": derived["turbulent_velocity"],
         "xnf_h": xnfh_mode12,  # CRITICAL: mode=12 (atomic H after H2 equilibrium)
+        # Fortran evidence:
+        # - xnfpelsyn.for line 258: CALL POPS(1.01D0,11,XNFPH)
+        # - atlas7v.for HMINOP line 6786 uses XNFPH(J,1) directly
+        # Store direct mode=11 XNFPH to avoid downstream reconstruction drift.
+        "xnfph": np.column_stack([xnf_h_basic, xnf_h2_basic]),
         "xnf_he1": xnfhe1_mode12,  # mode=12 for He I
         "xnf_he2": xnfhe2_mode12,  # mode=12 for He II
         "xnf_h2": xnf_h2,

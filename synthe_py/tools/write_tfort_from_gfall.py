@@ -10,7 +10,9 @@ from synthe_py.io.lines import compiler, tfort_write
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Write tfort.12/.14/.19/.20/.93 from gfall")
+    parser = argparse.ArgumentParser(
+        description="Write tfort.12/.14/.19/.20/.93 from gfall"
+    )
     parser.add_argument("--gfall", type=Path, required=True)
     parser.add_argument("--outdir", type=Path, required=True)
     parser.add_argument("--wlbeg", type=float, required=True)
@@ -53,9 +55,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
-
-
-
-
-
