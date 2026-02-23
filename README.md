@@ -46,7 +46,7 @@ cd /Users/ElliotKim/Desktop/Research/kurucz
 
 ## 2) Run Validation
 
-Run all samples:
+Run all samples (both Fortran and Python):
 
 ```bash
 cd /Users/ElliotKim/Desktop/Research/kurucz
@@ -60,12 +60,35 @@ cd /Users/ElliotKim/Desktop/Research/kurucz
 ./run_validation_100.sh -n 1 --atm at12_aaaaa_t02500g-1.0.atm
 ```
 
+Run only Python synthesis (skip Fortran):
+
+```bash
+./run_validation_100.sh -n all --python-only
+./run_validation_100.sh -n 1 --atm at12_aaaaa_t02500g-1.0.atm --python-only
+```
+
+Run only Fortran synthesis (skip Python):
+
+```bash
+./run_validation_100.sh -n all --fortran-only
+./run_validation_100.sh -n 1 --atm at12_aaaaa_t02500g-1.0.atm --fortran-only
+```
+
 Resume behavior is automatic:
 
 - skips Fortran if output spec already exists
 - skips Python if output spec already exists
 
 ## 3) Python-Only Pipeline
+
+One-command wrapper (only parameters: `.atm`, `wl_start`, `wl_end`):
+
+```bash
+cd /Users/ElliotKim/Desktop/Research/kurucz
+./run_python_pipeline.sh samples/at12_aaaaa_t02500g-1.0.atm 300 1800
+```
+
+Equivalent explicit commands:
 
 ```bash
 cd /Users/ElliotKim/Desktop/Research/kurucz

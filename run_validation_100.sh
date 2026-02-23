@@ -11,6 +11,8 @@
 # Usage:
 #   ./run_validation_100.sh -n all
 #   ./run_validation_100.sh -n 1 --atm at12_feh+0.25_afe+0.6_t02500g-1.0.atm
+#   ./run_validation_100.sh -n all --python-only
+#   ./run_validation_100.sh -n all --fortran-only
 
 set -euo pipefail
 
@@ -31,16 +33,21 @@ N_WORKERS="$(python3 -c 'import os; print(os.cpu_count() or 1)')"
 
 MODE="all"  # all | 1
 ATM_ONE=""
+RUN_MODE="both"  # both | python | fortran
 
 usage() {
     cat <<EOF
 Usage:
   $0 -n all
   $0 -n 1 --atm <atm file name or path>
+  $0 -n all --python-only
+  $0 -n all --fortran-only
 
 Options:
   -n <all|1>       Run all samples or exactly one atmosphere
   --atm <value>    Required when -n 1 (filename in samples/ or full path)
+  --python-only    Run only Python synthesis (skip Fortran)
+  --fortran-only   Run only Fortran synthesis (skip Python)
   -h, --help       Show this help
 EOF
 }
@@ -54,6 +61,14 @@ while [ "$#" -gt 0 ]; do
         --atm)
             ATM_ONE="$2"
             shift 2
+            ;;
+        --python-only)
+            RUN_MODE="python"
+            shift
+            ;;
+        --fortran-only)
+            RUN_MODE="fortran"
+            shift
             ;;
         -h|--help)
             usage
@@ -76,25 +91,31 @@ if [ ! -d "${SAMPLES_DIR}" ]; then
     echo "ERROR: Missing samples directory: ${SAMPLES_DIR}"
     exit 1
 fi
-if [ ! -f "${REPO_ROOT}/lines/gfallvac.latest" ]; then
-    echo "ERROR: Missing line list: ${REPO_ROOT}/lines/gfallvac.latest"
-    exit 1
+if [ "${RUN_MODE}" = "python" ] || [ "${RUN_MODE}" = "both" ]; then
+    if [ ! -f "${REPO_ROOT}/lines/gfallvac.latest" ]; then
+        echo "ERROR: Missing line list: ${REPO_ROOT}/lines/gfallvac.latest"
+        exit 1
+    fi
+    if [ ! -f "${REPO_ROOT}/synthe_py/data/atlas_tables.npz" ]; then
+        echo "ERROR: Missing atlas tables: ${REPO_ROOT}/synthe_py/data/atlas_tables.npz"
+        exit 1
+    fi
 fi
-if [ ! -f "${REPO_ROOT}/synthe_py/data/atlas_tables.npz" ]; then
-    echo "ERROR: Missing atlas tables: ${REPO_ROOT}/synthe_py/data/atlas_tables.npz"
-    exit 1
-fi
-if [ ! -x "${REPO_ROOT}/run_fortran_atm.sh" ]; then
-    echo "ERROR: Missing or non-executable runner: ${REPO_ROOT}/run_fortran_atm.sh"
-    echo "Run: chmod +x run_fortran_atm.sh"
-    exit 1
+if [ "${RUN_MODE}" = "fortran" ] || [ "${RUN_MODE}" = "both" ]; then
+    if [ ! -x "${REPO_ROOT}/run_fortran_atm.sh" ]; then
+        echo "ERROR: Missing or non-executable runner: ${REPO_ROOT}/run_fortran_atm.sh"
+        echo "Run: chmod +x run_fortran_atm.sh"
+        exit 1
+    fi
 fi
 
 mkdir -p "${FORTRAN_SPECS}" "${PYTHON_NPZ}" "${PYTHON_SPECS}" "${LOG_DIR}"
 
 declare -a ATM_LIST=()
 if [ "${MODE}" = "all" ]; then
-    mapfile -t ATM_LIST < <(find "${SAMPLES_DIR}" -maxdepth 1 -type f -name "*.atm" | sort)
+    while IFS= read -r atm_file; do
+        ATM_LIST+=("${atm_file}")
+    done < <(find "${SAMPLES_DIR}" -maxdepth 1 -type f -name "*.atm" | sort)
     if [ "${#ATM_LIST[@]}" -eq 0 ]; then
         echo "ERROR: No .atm files found in ${SAMPLES_DIR}"
         exit 1
@@ -114,7 +135,7 @@ else
     fi
 fi
 
-echo "Running ${#ATM_LIST[@]} atmosphere(s)"
+echo "Running ${#ATM_LIST[@]} atmosphere(s) [mode: ${RUN_MODE}]"
 echo "Fixed settings: wl=${WL_START}:${WL_END}, resolution=${RESOLUTION}"
 echo "Resume mode: existing outputs are skipped"
 
@@ -128,35 +149,39 @@ for atm_path in "${ATM_LIST[@]}"; do
 
     echo "=== ${stem} ==="
 
-    if [ -f "${ft_spec}" ]; then
-        echo "FORTRAN SKIP: ${stem} (exists: ${ft_spec})"
-    else
-        if ! ./run_fortran_atm.sh "${atm_path}" "${ft_spec}" > "${ft_log}" 2>&1; then
-            echo "FORTRAN FAIL: ${stem} (see ${ft_log})"
+    if [ "${RUN_MODE}" = "fortran" ] || [ "${RUN_MODE}" = "both" ]; then
+        if [ -f "${ft_spec}" ]; then
+            echo "FORTRAN SKIP: ${stem} (exists: ${ft_spec})"
+        else
+            if ! ./run_fortran_atm.sh "${atm_path}" "${ft_spec}" > "${ft_log}" 2>&1; then
+                echo "FORTRAN FAIL: ${stem} (see ${ft_log})"
+            fi
         fi
     fi
 
-    if [ -f "${py_spec}" ]; then
-        echo "PYTHON SKIP: ${stem} (exists: ${py_spec})"
-    else
-        if ! {
-            python3 synthe_py/tools/convert_atm_to_npz.py \
-                "${atm_path}" \
-                "${py_npz}" \
-                --atlas-tables "${REPO_ROOT}/synthe_py/data/atlas_tables.npz" && \
-            python3 -m synthe_py.cli \
-                "${atm_path}" \
-                "${REPO_ROOT}/lines/gfallvac.latest" \
-                --npz "${py_npz}" \
-                --spec "${py_spec}" \
-                --wl-start "${WL_START}" \
-                --wl-end "${WL_END}" \
-                --resolution "${RESOLUTION}" \
-                --n-workers "${N_WORKERS}" \
-                --cache "${REPO_ROOT}/synthe_py/out/line_cache" \
-                --log-level INFO
-        } > "${py_log}" 2>&1; then
-            echo "PYTHON FAIL: ${stem} (see ${py_log})"
+    if [ "${RUN_MODE}" = "python" ] || [ "${RUN_MODE}" = "both" ]; then
+        if [ -f "${py_spec}" ]; then
+            echo "PYTHON SKIP: ${stem} (exists: ${py_spec})"
+        else
+            if ! {
+                python3 synthe_py/tools/convert_atm_to_npz.py \
+                    "${atm_path}" \
+                    "${py_npz}" \
+                    --atlas-tables "${REPO_ROOT}/synthe_py/data/atlas_tables.npz" && \
+                python3 -m synthe_py.cli \
+                    "${atm_path}" \
+                    "${REPO_ROOT}/lines/gfallvac.latest" \
+                    --npz "${py_npz}" \
+                    --spec "${py_spec}" \
+                    --wl-start "${WL_START}" \
+                    --wl-end "${WL_END}" \
+                    --resolution "${RESOLUTION}" \
+                    --n-workers "${N_WORKERS}" \
+                    --cache "${REPO_ROOT}/synthe_py/out/line_cache" \
+                    --log-level INFO
+            } > "${py_log}" 2>&1; then
+                echo "PYTHON FAIL: ${stem} (see ${py_log})"
+            fi
         fi
     fi
 
