@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import json
 import logging
+import os
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Optional, Tuple
 
@@ -14,6 +17,61 @@ _H_PLANCK = 6.62607015e-27  # erg * s
 _C_LIGHT = 2.99792458e10  # cm / s
 _C_LIGHT_NM = 2.99792458e17  # nm / s
 _K_BOLTZ = 1.380649e-16  # erg / K
+_RT_DEBUG_ENABLED = os.getenv("PY_ENABLE_RT_DEBUG", "0") == "1"
+_RT_AUTO_DEBUG_ENABLED = os.getenv("PY_ENABLE_RT_AUTO_DEBUG", "0") == "1"
+_RT_FAILURE_DEBUG_ENABLED = os.getenv("PY_ENABLE_RT_FAILURE_DEBUG", "0") == "1"
+_AGENT_DEBUG_ENABLED = os.getenv("PY_ENABLE_AGENT_DEBUG_LOGS", "0") == "1"
+_AGENT_DEBUG_LOG_PATH = os.getenv(
+    "PY_AGENT_DEBUG_LOG_PATH",
+    "results/validation_100/radiative_agent_debug.ndjson",
+)
+_AGENT_DEBUG_SESSION_ID = "b6f400"
+_AGENT_DEBUG_TARGET_WAVES = (
+    422.79323578,
+    589.15896422,
+    300.18446200,
+    400.00000000,
+    318.86688440,
+    447.10635430,
+    447.27559960,
+    447.31356123,
+    308.71353613,
+    309.43264466,
+    380.76032024,
+    382.06984188,
+    456.91153400,
+    587.72513000,
+    632.00000000,
+    634.46600000,
+    636.36093300,
+)
+_AGENT_DEBUG_WAVE_TOL = 5.0e-2
+
+
+def _agent_write_log(
+    run_id: str,
+    hypothesis_id: str,
+    location: str,
+    message: str,
+    data: dict,
+) -> None:
+    if not _AGENT_DEBUG_ENABLED or not run_id:
+        return
+    payload = {
+        "sessionId": _AGENT_DEBUG_SESSION_ID,
+        "runId": run_id,
+        "hypothesisId": hypothesis_id,
+        "location": location,
+        "message": message,
+        "data": data,
+        "timestamp": int(time.time() * 1000),
+    }
+    try:
+        with open(_AGENT_DEBUG_LOG_PATH, "a", encoding="utf-8") as fp:
+            fp.write(json.dumps(payload, separators=(",", ":")) + "\n")
+    except Exception:
+        # Debug logging must not affect solver behavior.
+        pass
 
 
 def _planck_nu(freq: float, temperature: np.ndarray) -> np.ndarray:
@@ -49,6 +107,9 @@ def solve_lte_frequency(
     line_source: Optional[np.ndarray] = None,
     debug: bool = False,
 ) -> Tuple[float, float]:
+    # Keep deep RT diagnostics opt-in so standard parity runs remain deterministic.
+    debug = bool(debug and _RT_DEBUG_ENABLED)
+
     # Filter INF/NaN values in continuum opacity (prevents TAUNU integration failure)
     # Fortran uses REAL*4 for CONTINUUM (max ~3.4e38), so filter values exceeding this
     # Reference: synthe.for line 9 (REAL*4) and line 215 (10.**CONTINUUM)
@@ -67,29 +128,30 @@ def solve_lte_frequency(
     )
     if not np.any(mask):
         # CRITICAL DEBUG: Why is mask all False?
-        print(f"\n{'='*70}")
-        print(f"CRITICAL: All layers filtered out in solve_lte_frequency!")
-        print(f"{'='*70}")
-        print(f"  Wavelength: {wavelength_nm:.6f} nm")
-        print(f"  Total layers: {len(column_mass)}")
-        print(f"  column_mass >= 0: {np.sum(column_mass >= 0.0)}")
-        print(f"  isfinite(column_mass): {np.sum(np.isfinite(column_mass))}")
-        print(f"  isfinite(cont_abs): {np.sum(np.isfinite(cont_abs))}")
-        print(f"  isfinite(cont_scat): {np.sum(np.isfinite(cont_scat))}")
-        print(f"  isfinite(line_opacity): {np.sum(np.isfinite(line_opacity))}")
-        print(f"  isfinite(line_scattering): {np.sum(np.isfinite(line_scattering))}")
-        print(f"  cont_abs < MAX: {np.sum(cont_abs < MAX_OPACITY_REAL4)}")
-        print(f"  cont_scat < MAX: {np.sum(cont_scat < MAX_OPACITY_REAL4)}")
-        print(f"  line_opacity < MAX: {np.sum(line_opacity < MAX_OPACITY_REAL4)}")
-        print(f"  line_scattering < MAX: {np.sum(line_scattering < MAX_OPACITY_REAL4)}")
-        print(
-            f"  line_opacity max: {np.max(line_opacity) if line_opacity.size > 0 else 'N/A':.8E}"
-        )
-        print(
-            f"  line_scattering max: {np.max(line_scattering) if line_scattering.size > 0 else 'N/A':.8E}"
-        )
-        print(f"  Mask sum: {np.sum(mask)}")
-        print(f"{'='*70}\n")
+        if _RT_FAILURE_DEBUG_ENABLED:
+            print(f"\n{'='*70}")
+            print(f"CRITICAL: All layers filtered out in solve_lte_frequency!")
+            print(f"{'='*70}")
+            print(f"  Wavelength: {wavelength_nm:.6f} nm")
+            print(f"  Total layers: {len(column_mass)}")
+            print(f"  column_mass >= 0: {np.sum(column_mass >= 0.0)}")
+            print(f"  isfinite(column_mass): {np.sum(np.isfinite(column_mass))}")
+            print(f"  isfinite(cont_abs): {np.sum(np.isfinite(cont_abs))}")
+            print(f"  isfinite(cont_scat): {np.sum(np.isfinite(cont_scat))}")
+            print(f"  isfinite(line_opacity): {np.sum(np.isfinite(line_opacity))}")
+            print(f"  isfinite(line_scattering): {np.sum(np.isfinite(line_scattering))}")
+            print(f"  cont_abs < MAX: {np.sum(cont_abs < MAX_OPACITY_REAL4)}")
+            print(f"  cont_scat < MAX: {np.sum(cont_scat < MAX_OPACITY_REAL4)}")
+            print(f"  line_opacity < MAX: {np.sum(line_opacity < MAX_OPACITY_REAL4)}")
+            print(f"  line_scattering < MAX: {np.sum(line_scattering < MAX_OPACITY_REAL4)}")
+            print(
+                f"  line_opacity max: {np.max(line_opacity) if line_opacity.size > 0 else 'N/A':.8E}"
+            )
+            print(
+                f"  line_scattering max: {np.max(line_scattering) if line_scattering.size > 0 else 'N/A':.8E}"
+            )
+            print(f"  Mask sum: {np.sum(mask)}")
+            print(f"{'='*70}\n")
         return 0.0, 0.0
 
     # RHOX is now read correctly from fort.5 (not fort.10's wrong "depth" field)
@@ -100,13 +162,14 @@ def solve_lte_frequency(
     valid_mask = mass_raw > 0
     if not np.any(valid_mask):
         # CRITICAL DEBUG: Why are all masses zero?
-        print(f"\n{'='*70}")
-        print(f"CRITICAL: All column masses are zero or negative!")
-        print(f"{'='*70}")
-        print(f"  Wavelength: {wavelength_nm:.6f} nm")
-        print(f"  mass_raw min/max: {mass_raw.min():.8E} / {mass_raw.max():.8E}")
-        print(f"  mass_raw > 0 count: {np.sum(mass_raw > 0)}")
-        print(f"{'='*70}\n")
+        if _RT_FAILURE_DEBUG_ENABLED:
+            print(f"\n{'='*70}")
+            print(f"CRITICAL: All column masses are zero or negative!")
+            print(f"{'='*70}")
+            print(f"  Wavelength: {wavelength_nm:.6f} nm")
+            print(f"  mass_raw min/max: {mass_raw.min():.8E} / {mass_raw.max():.8E}")
+            print(f"  mass_raw > 0 count: {np.sum(mass_raw > 0)}")
+            print(f"{'='*70}\n")
         return 0.0, 0.0
 
     mass_valid = mass_raw[valid_mask]
@@ -222,7 +285,7 @@ def solve_lte_frequency(
     # The reversal happened in the full array before masking, so masking preserves alignment
 
     # CRITICAL DEBUG: Check line_source values at problematic wavelengths
-    if line_source is not None and (312.36 <= wavelength_nm <= 312.64):
+    if _RT_DEBUG_ENABLED and line_source is not None and (312.36 <= wavelength_nm <= 312.64):
         print(f"\n{'='*70}")
         print(f"DEBUG: Line source values at {wavelength_nm:.6f} nm")
         print(f"{'='*70}")
@@ -259,7 +322,12 @@ def solve_lte_frequency(
         print(f"{'='*70}\n")
 
     # CRITICAL DEBUG: Check if line_opacity is being filtered out incorrectly
-    if line_a.size > 0 and np.any(line_opacity > 0) and np.all(line_a == 0):
+    if (
+        _RT_DEBUG_ENABLED
+        and line_a.size > 0
+        and np.any(line_opacity > 0)
+        and np.all(line_a == 0)
+    ):
         print(f"\n{'='*70}")
         print(f"CRITICAL: line_opacity has non-zero values but line_a is all zeros!")
         print(f"{'='*70}")
@@ -315,11 +383,14 @@ def solve_lte_frequency(
         318.839251,
         318.877513,
     ]
-    debug = any(abs(wavelength_nm - w) < 0.01 for w in problem_waves)
+    auto_debug = _RT_AUTO_DEBUG_ENABLED and any(
+        abs(wavelength_nm - w) < 0.01 for w in problem_waves
+    )
+    debug = debug or auto_debug
 
     # CRITICAL DEBUG: Always check planck[0] for 300.00040572
     # Also enable debug for JOSH solver to get ATLAS7V debug output
-    debug_wavelength = (
+    debug_wavelength = _RT_AUTO_DEBUG_ENABLED and (
         abs(wavelength_nm - 300.00040572) < 0.0001
         or abs(wavelength_nm - 418.148489) < 0.0001
         or abs(wavelength_nm - 403.188153) < 0.0001
@@ -337,7 +408,9 @@ def solve_lte_frequency(
 
     # Debug: Check line opacity and source function values
     # Also enable debug if line opacity is huge (potential TAUNU overflow issue)
-    huge_line_opacity = line_a[0] > 1e10 if line_a.size > 0 else False
+    huge_line_opacity = (
+        _RT_AUTO_DEBUG_ENABLED and line_a[0] > 1e10 if line_a.size > 0 else False
+    )
     if debug or huge_line_opacity:
         print(f"\n{'='*70}")
         print(f"PYTHON LINE OPACITY DEBUG (wavelength {wavelength_nm:.6f} nm)")
@@ -433,9 +506,132 @@ def solve_lte_frequency(
         temperature=temp,  # Pass temperature for debug output
     )
 
+    # Counterfactual source test (read-only): evaluate whether forcing SLINE≈0
+    # would move the output toward Fortran at known problematic wavelengths.
+    agent_run_id = os.getenv("PY_AGENT_DEBUG_RUN_ID", "")
+    if _AGENT_DEBUG_ENABLED and agent_run_id and any(
+        abs(wavelength_nm - w) <= _AGENT_DEBUG_WAVE_TOL for w in _AGENT_DEBUG_TARGET_WAVES
+    ):
+        try:
+            flux_total_zero_src = solve_josh_flux(
+                cont_a,
+                planck,
+                line_a,
+                np.zeros_like(line_src),
+                cont_s,
+                line_sig,
+                mass,
+                debug=False,
+                debug_label=f"ALT_ZERO_SRC_{wavelength_nm:.8f}",
+                temperature=temp,
+            )
+        except Exception:
+            flux_total_zero_src = float("nan")
+        try:
+            flux_total_line2x = solve_josh_flux(
+                cont_a,
+                planck,
+                2.0 * line_a,
+                line_src,
+                cont_s,
+                line_sig,
+                mass,
+                debug=False,
+                debug_label=f"ALT_LINE2X_{wavelength_nm:.8f}",
+                temperature=temp,
+            )
+        except Exception:
+            flux_total_line2x = float("nan")
+        try:
+            flux_total_line5x = solve_josh_flux(
+                cont_a,
+                planck,
+                5.0 * line_a,
+                line_src,
+                cont_s,
+                line_sig,
+                mass,
+                debug=False,
+                debug_label=f"ALT_LINE5X_{wavelength_nm:.8f}",
+                temperature=temp,
+            )
+        except Exception:
+            flux_total_line5x = float("nan")
+        try:
+            flux_total_line100x = solve_josh_flux(
+                cont_a,
+                planck,
+                100.0 * line_a,
+                line_src,
+                cont_s,
+                line_sig,
+                mass,
+                debug=False,
+                debug_label=f"ALT_LINE100X_{wavelength_nm:.8f}",
+                temperature=temp,
+            )
+        except Exception:
+            flux_total_line100x = float("nan")
+        # region agent log
+        _agent_write_log(
+            run_id=agent_run_id,
+            hypothesis_id="H11",
+            location="synthe_py/engine/radiative.py:alt_zero_source",
+            message="Current line source vs zero-source counterfactual",
+            data={
+                "wavelengthNm": float(wavelength_nm),
+                "fluxTotalCurrentHz": float(flux_total),
+                "fluxTotalZeroSrcHz": float(flux_total_zero_src),
+                "fluxTotalLine2xHz": float(flux_total_line2x),
+                "fluxTotalLine5xHz": float(flux_total_line5x),
+                "fluxTotalLine100xHz": float(flux_total_line100x),
+                "fluxContHz": float(flux_cont),
+                "lineOpacitySurface": float(line_a[0]) if line_a.size > 0 else 0.0,
+                "lineSourceSurface": float(line_src[0]) if line_src.size > 0 else 0.0,
+                "contAbsSurface": float(cont_a[0]) if cont_a.size > 0 else 0.0,
+                "contScatSurface": float(cont_s[0]) if cont_s.size > 0 else 0.0,
+                "lineScatSurface": float(line_sig[0]) if line_sig.size > 0 else 0.0,
+                "surfaceScatteringFraction": (
+                    float(
+                        (cont_s[0] + line_sig[0])
+                        / max(cont_a[0] + line_a[0] + cont_s[0] + line_sig[0], 1e-40)
+                    )
+                    if (
+                        cont_a.size > 0
+                        and line_a.size > 0
+                        and cont_s.size > 0
+                        and line_sig.size > 0
+                    )
+                    else 0.0
+                ),
+                "contAbsMean": float(np.mean(cont_a)) if cont_a.size > 0 else 0.0,
+                "contScatMean": float(np.mean(cont_s)) if cont_s.size > 0 else 0.0,
+                "lineOpacityMean": float(np.mean(line_a)) if line_a.size > 0 else 0.0,
+                "lineScatMean": float(np.mean(line_sig)) if line_sig.size > 0 else 0.0,
+                "lineSourceMean": float(np.mean(line_src)) if line_src.size > 0 else 0.0,
+            },
+        )
+        # endregion
+        # region agent log
+        _agent_write_log(
+            run_id=agent_run_id,
+            hypothesis_id="H14",
+            location="synthe_py/engine/radiative.py:alt_line_opacity_scale",
+            message="Counterfactual line-opacity scaling impact",
+            data={
+                "wavelengthNm": float(wavelength_nm),
+                "fluxTotalCurrentHz": float(flux_total),
+                "fluxTotalLine2xHz": float(flux_total_line2x),
+                "fluxTotalLine5xHz": float(flux_total_line5x),
+                "fluxTotalLine100xHz": float(flux_total_line100x),
+                "lineOpacitySurface": float(line_a[0]) if line_a.size > 0 else 0.0,
+            },
+        )
+        # endregion
+
     # CRITICAL DEBUG: Check if flux_total is zero
     # Check for exactly zero OR very small values
-    if (
+    if _RT_FAILURE_DEBUG_ENABLED and (
         flux_total == 0.0
         or abs(flux_total) < 1e-50
         or np.isnan(flux_total)
@@ -462,7 +658,7 @@ def solve_lte_frequency(
 
     # CRITICAL DEBUG: Check if flux_cont is zero
     # Check for exactly zero OR very small values
-    if (
+    if _RT_FAILURE_DEBUG_ENABLED and (
         flux_cont == 0.0
         or abs(flux_cont) < 1e-50
         or np.isnan(flux_cont)

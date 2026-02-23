@@ -29,6 +29,9 @@ except Exception:  # pragma: no cover - numba is optional
 
 SQRT_PI = np.sqrt(np.pi)
 HE_DATA_PATH = Path(__file__).resolve().parents[1] / "data"
+# Fortran synthe.for GRIEM/DIMITRI lookup uses +/- 0.1 nm window:
+# IF(WL.GT.WAVE(ILINE)-.1.AND.WL.LT.WAVE(ILINE)+.1)
+HE_TABLE_MATCH_TOL_NM = 0.1
 
 
 # Shared Voigt profile — single canonical JIT-compiled implementation
@@ -140,6 +143,52 @@ def _evaluate_helium_profile_jit(
                         int(bcs_len[0]),
                     )
                 )
+            ts = np.array([5.0e3, 1.0e4, 2.0e4, 4.0e4])
+            ws = np.array([0.001460, 0.001269, 0.001079, 0.000898])
+            ds = np.array([0.036, -0.005, -0.026, -0.034])
+            alfs = np.array([0.107, 0.119, 0.134, 0.154])
+            den = 1.0e13
+            it = 1
+            for i in range(1, 4):
+                it = i
+                if ts[i] >= temp:
+                    break
+            x = (temp - ts[it - 1]) / (ts[it] - ts[it - 1])
+            xx = e_density / den
+            width = xx * (x * ws[it] + (1.0 - x) * ws[it - 1])
+            shift = x * ds[it] + (1.0 - x) * ds[it - 1]
+            alf = xx**0.25 * (x * alfs[it] + (1.0 - x) * alfs[it - 1])
+            xx_ratio = xnfhp / e_density if e_density > 0.0 else 0.0
+            vm1 = 8.78 * (xx_ratio + 2.0 * (1.0 - xx_ratio)) / np.sqrt(temp)
+            rhom = 1.0 / (4.19 * e_density) ** (1.0 / 3.0)
+            sigma = 1.885e14 * width * rhom * vm1 / (line_wavelength * 10.0) ** 2
+            sigma = max(sigma, 1e-40)
+            ion_term = alf ** (8.0 / 9.0) / sigma ** (1.0 / 3.0)
+            wtot = width * (1.0 + 1.36 * ion_term) * 0.1
+            dtot = width * shift * (1.0 + 2.36 * ion_term / max(abs(shift), 1e-12)) * 0.1
+            a = wtot / doppler
+            wwd = wave - line_wavelength - dtot
+            return (
+                _voigt_profile_jit(abs(wwd - 0.0184) / doppler, a, h0tab, h1tab, h2tab)
+                / 9.0
+                + _voigt_profile_jit(
+                    abs(wwd + 0.0013) / doppler, a, h0tab, h1tab, h2tab
+                )
+                / 12.0
+                + _voigt_profile_jit(
+                    abs(wwd + 0.0010) / doppler, a, h0tab, h1tab, h2tab
+                )
+                / 4.0
+                + _voigt_profile_jit(
+                    abs(wwd + 0.0029) / doppler, a, h0tab, h1tab, h2tab
+                )
+                / 180.0
+                + _voigt_profile_jit(
+                    abs(wwd + 0.0025) / doppler, a, h0tab, h1tab, h2tab
+                )
+                * 11.0
+                / 20.0
+            )
         if abs(line_wavelength - 402.62) < 0.4:
             if e_density > 1.0e14:
                 return (
@@ -153,6 +202,52 @@ def _evaluate_helium_profile_jit(
                         int(bcs_len[1]),
                     )
                 )
+            ts = np.array([5.0e3, 1.0e4, 2.0e4, 4.0e4])
+            ws = np.array([4.04, 3.49, 2.96, 2.47])
+            ds = np.array([0.1339, 0.0960, 0.0780, 0.0709])
+            alfs = np.array([0.969, 1.083, 1.225, 1.403])
+            den = 1.0e16
+            it = 1
+            for i in range(1, 4):
+                it = i
+                if ts[i] >= temp:
+                    break
+            x = (temp - ts[it - 1]) / (ts[it] - ts[it - 1])
+            xx = e_density / den
+            width = xx * (x * ws[it] + (1.0 - x) * ws[it - 1])
+            shift = x * ds[it] + (1.0 - x) * ds[it - 1]
+            alf = xx**0.25 * (x * alfs[it] + (1.0 - x) * alfs[it - 1])
+            xx_ratio = xnfhp / e_density if e_density > 0.0 else 0.0
+            vm1 = 8.78 * (xx_ratio + 2.0 * (1.0 - xx_ratio)) / np.sqrt(temp)
+            rhom = 1.0 / (4.19 * e_density) ** (1.0 / 3.0)
+            sigma = 1.885e14 * width * rhom * vm1 / (line_wavelength * 10.0) ** 2
+            sigma = max(sigma, 1e-40)
+            ion_term = alf ** (8.0 / 9.0) / sigma ** (1.0 / 3.0)
+            wtot = width * (1.0 + 1.36 * ion_term) * 0.1
+            dtot = width * shift * (1.0 + 2.36 * ion_term / max(abs(shift), 1e-12)) * 0.1
+            a = wtot / doppler
+            wwd = wave - line_wavelength - dtot
+            return (
+                _voigt_profile_jit(abs(wwd - 0.0148) / doppler, a, h0tab, h1tab, h2tab)
+                / 9.0
+                + _voigt_profile_jit(
+                    abs(wwd + 0.0012) / doppler, a, h0tab, h1tab, h2tab
+                )
+                / 12.0
+                + _voigt_profile_jit(
+                    abs(wwd + 0.0011) / doppler, a, h0tab, h1tab, h2tab
+                )
+                / 4.0
+                + _voigt_profile_jit(
+                    abs(wwd + 0.0025) / doppler, a, h0tab, h1tab, h2tab
+                )
+                / 180.0
+                + _voigt_profile_jit(
+                    abs(wwd + 0.0023) / doppler, a, h0tab, h1tab, h2tab
+                )
+                * 11.0
+                / 20.0
+            )
         if abs(line_wavelength - 438.79) < 0.4:
             if e_density > 1.0e14:
                 return (
@@ -166,6 +261,33 @@ def _evaluate_helium_profile_jit(
                         int(bcs_len[2]),
                     )
                 )
+            ts = np.array([5.0e3, 1.0e4, 2.0e4, 4.0e4])
+            ws = np.array([6.13, 5.15, 4.24, 3.45])
+            ds = np.array([0.411, 0.363, 0.325, 0.293])
+            alfs = np.array([1.159, 1.321, 1.527, 1.783])
+            den = 1.0e16
+            it = 1
+            for i in range(1, 4):
+                it = i
+                if ts[i] >= temp:
+                    break
+            x = (temp - ts[it - 1]) / (ts[it] - ts[it - 1])
+            xx = e_density / den
+            width = xx * (x * ws[it] + (1.0 - x) * ws[it - 1])
+            shift = x * ds[it] + (1.0 - x) * ds[it - 1]
+            alf = xx**0.25 * (x * alfs[it] + (1.0 - x) * alfs[it - 1])
+            xx_ratio = xnfhp / e_density if e_density > 0.0 else 0.0
+            vm1 = 8.78 * (xx_ratio + 2.0 * (1.0 - xx_ratio)) / np.sqrt(temp)
+            rhom = 1.0 / (4.19 * e_density) ** (1.0 / 3.0)
+            sigma = 1.885e14 * width * rhom * vm1 / (line_wavelength * 10.0) ** 2
+            sigma = max(sigma, 1e-40)
+            ion_term = alf ** (8.0 / 9.0) / sigma ** (1.0 / 3.0)
+            wtot = width * (1.0 + 1.36 * ion_term) * 0.1
+            dtot = width * shift * (1.0 + 2.36 * ion_term / max(abs(shift), 1e-12)) * 0.1
+            a = wtot / doppler
+            return _voigt_profile_jit(
+                abs(wave - line_wavelength - dtot) / doppler, a, h0tab, h1tab, h2tab
+            )
         if abs(line_wavelength - 492.19) < 0.4:
             if e_density > 1.0e13:
                 return (
@@ -179,9 +301,35 @@ def _evaluate_helium_profile_jit(
                         int(bcs_len[3]),
                     )
                 )
+            ts = np.array([5.0e3, 1.0e4, 2.0e4, 4.0e4])
+            ws = np.array([0.002312, 0.001963, 0.001624, 0.001315])
+            ds = np.array([0.3932, 0.3394, 0.2950, 0.2593])
+            alfs = np.array([0.1207, 0.1365, 0.1564, 0.1844])
+            den = 1.0e13
+            it = 1
+            for i in range(1, 4):
+                it = i
+                if ts[i] >= temp:
+                    break
+            x = (temp - ts[it - 1]) / (ts[it] - ts[it - 1])
+            xx = e_density / den
+            width = xx * (x * ws[it] + (1.0 - x) * ws[it - 1])
+            shift = x * ds[it] + (1.0 - x) * ds[it - 1]
+            alf = xx**0.25 * (x * alfs[it] + (1.0 - x) * alfs[it - 1])
+            xx_ratio = xnfhp / e_density if e_density > 0.0 else 0.0
+            vm1 = 8.78 * (xx_ratio + 2.0 * (1.0 - xx_ratio)) / np.sqrt(temp)
+            rhom = 1.0 / (4.19 * e_density) ** (1.0 / 3.0)
+            sigma = 1.885e14 * width * rhom * vm1 / (line_wavelength * 10.0) ** 2
+            sigma = max(sigma, 1e-40)
+            ion_term = alf ** (8.0 / 9.0) / sigma ** (1.0 / 3.0)
+            wtot = width * (1.0 + 1.36 * ion_term) * 0.1
+            dtot = width * shift * (1.0 + 2.36 * ion_term / max(abs(shift), 1e-12)) * 0.1
+            a = wtot / doppler
+            wwd = wave - line_wavelength - dtot
+            return _voigt_profile_jit(abs(wwd) / doppler, a, h0tab, h1tab, h2tab)
 
     if line_type in (-3, -4, -6):
-        idx = _find_record_jit(dim_wavelength, line_wavelength, 0.2)
+        idx = _find_record_jit(dim_wavelength, line_wavelength, HE_TABLE_MATCH_TOL_NM)
         if idx >= 0:
             record_ttab = dim_ttab[idx]
             it = 1
@@ -215,7 +363,7 @@ def _evaluate_helium_profile_jit(
                 abs(wave - line_wavelength - dtot_nm) / doppler, a, h0tab, h1tab, h2tab
             )
 
-        idx = _find_record_jit(griem_wavelength, line_wavelength, 0.2)
+        idx = _find_record_jit(griem_wavelength, line_wavelength, HE_TABLE_MATCH_TOL_NM)
         if idx < 0:
             a = (gamma_rad + gamma_stark * e_density) / (doppler / line_wavelength)
             return _voigt_profile_jit(
@@ -864,7 +1012,7 @@ class HeliumWingSolver:
     ) -> float:
         if doppler <= 0.0:
             return 0.0
-        idx = _find_record(self.griem_records, wl, 0.2)
+        idx = _find_record(self.griem_records, wl, HE_TABLE_MATCH_TOL_NM)
         if idx is None:
             a = (gamma_rad + gamma_stark * self.electron_density[depth_idx]) / (
                 doppler / wl
@@ -906,7 +1054,7 @@ class HeliumWingSolver:
     ) -> float:
         if doppler <= 0.0:
             return 0.0
-        idx = _find_record(self.dimitri_records, wl, 0.2)
+        idx = _find_record(self.dimitri_records, wl, HE_TABLE_MATCH_TOL_NM)
         if idx is None:
             return self._griem_profile(
                 depth_idx, wave, wl, doppler, gamma_rad, gamma_stark
@@ -962,7 +1110,12 @@ class HeliumWingSolver:
             if abs(line_wavelength - 492.19) < 0.4:
                 return self._hé4921(depth_idx, wave, line_wavelength, doppler)
             # other He I lines
-            if _find_record(self.dimitri_records, line_wavelength, 0.2) is not None:
+            if (
+                _find_record(
+                    self.dimitri_records, line_wavelength, HE_TABLE_MATCH_TOL_NM
+                )
+                is not None
+            ):
                 return self._dimitri_profile(
                     depth_idx, wave, line_wavelength, doppler, gamma_rad, gamma_stark
                 )

@@ -17,8 +17,10 @@ Where:
 
 from __future__ import annotations
 
+import json
 import math
 import os
+import time
 from typing import TYPE_CHECKING, Optional, Tuple, Dict
 import logging
 import numpy as np
@@ -44,6 +46,92 @@ except ImportError:
 
 
 logger = logging.getLogger(__name__)
+_AGENT_DEBUG_LOG_PATH = "/Users/ElliotKim/Desktop/Research/kurucz/.cursor/debug-b6f400.log"
+_AGENT_DEBUG_SESSION_ID = "b6f400"
+_AGENT_DEBUG_TARGET_WAVELENGTHS = (
+    300.184462,
+    357.11464700,
+    385.74893900,
+    396.26111000,
+    429.09423800,
+    318.86688440,
+    447.10635430,
+    447.27559960,
+    447.31356123,
+    308.71353613,
+    309.43264466,
+    380.76032024,
+    382.06984188,
+    456.91153400,
+    587.72513000,
+    632.000000,
+    634.466000,
+    636.360933,
+    656.372976,
+    656.593992,
+)
+_AGENT_DEBUG_WAVELENGTH_TOL = 5.0e-2
+_AGENT_DEBUG_FORTRAN_LINE_WAVELENGTHS = (
+    357.11169,  # t04000 hotspot dominant Fe I line
+    385.74647,  # t04000 hotspot dominant Fe I line
+    396.26366,  # t04000 hotspot dominant Al I multiplet
+    396.26380,  # t04000 hotspot dominant Al I multiplet
+    396.26401,  # t04000 hotspot dominant Al I multiplet
+    396.26424,  # t04000 hotspot dominant Al I multiplet
+    396.26434,  # t04000 hotspot dominant Al I multiplet
+    429.09241,  # t04000 hotspot dominant Cr I line
+    318.76587,  # Nearby Fe II wing candidate for UV hotspot
+    318.86674,  # Cr II center line at hotspot bin
+    318.86682,  # He I fort.19 triplet component
+    318.90013,  # Cu III line surviving deep-layer cutoff
+    447.10635,  # Hotspot wing location near He I 447.28
+    447.27560,  # He I fort.19 center component
+    447.31356,  # Secondary hotspot in He I red wing
+    382.0622,  # Fortran FORT12 debug anchor (Fe III)
+    382.06872,  # He I triplet component near hotspot
+    382.06983,  # He I triplet component near hotspot
+    587.7036,  # Fortran FORT12 debug anchor
+    587.7192,  # Fortran FORT12 debug anchor
+    587.72432,  # He I D3 component near hotspot
+    587.72536,  # He I D3 component near hotspot
+    587.72688,  # He I D3 component near hotspot
+    357.11465,  # t04000 hotspot neighborhood
+    385.74894,  # t04000 hotspot neighborhood
+    396.26111,  # t04000 hotspot neighborhood
+    429.09424,  # t04000 hotspot neighborhood
+    636.35457,  # strong line near t04250 random hotspot
+    656.21462,  # H-alpha wing component region (air)
+    656.27957,  # H-alpha center region (air)
+    656.45377,  # H-alpha wing component region (air)
+)
+_AGENT_DEBUG_FORTRAN_LINE_TOL = 2.0e-3
+
+
+def _agent_write_log(
+    *,
+    run_id: str,
+    hypothesis_id: str,
+    location: str,
+    message: str,
+    data: Dict[str, object],
+) -> None:
+    """Append one NDJSON debug event for agent runtime analysis."""
+    if not run_id:
+        return
+    payload = {
+        "sessionId": _AGENT_DEBUG_SESSION_ID,
+        "runId": run_id,
+        "hypothesisId": hypothesis_id,
+        "location": location,
+        "message": message,
+        "data": data,
+        "timestamp": int(time.time() * 1000),
+    }
+    try:
+        with open(_AGENT_DEBUG_LOG_PATH, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(payload, separators=(",", ":")) + "\n")
+    except Exception:
+        pass
 
 if TYPE_CHECKING:
     from ..io.atmosphere import AtmosphereModel
@@ -302,12 +390,6 @@ def _compute_asynth_wings_kernel(
             dopple = doppler_width / line_wavelength if line_wavelength > 0.0 else 1e-10
             n10dop = int(10.0 * dopple * resolu)
 
-            # Keep at least one wing step when N10DOP rounds to zero.
-            # This preserves weak far-wing contributions from very narrow lines that
-            # still affect nearby grid points in Fortran parity runs.
-            if n10dop == 0:
-                n10dop = 1
-
             # Get WCON/WTAIL for this line/depth (if available)
             wcon = -1.0  # Use -1.0 as sentinel for "not set"
             wtail = -1.0
@@ -564,8 +646,9 @@ def compute_transp(
     transp = np.zeros((n_lines, n_depths), dtype=np.float64)
     valid_mask = np.zeros((n_lines, n_depths), dtype=bool)
 
-    # Progress logging
-    log_interval = max(1, n_lines // 20)  # Log every 5%
+    # Progress logging in this hot loop can be expensive. Keep it opt-in.
+    transp_progress = os.getenv("PY_TRANSP_PROGRESS", "0") == "1"
+    log_interval = max(1, n_lines // 20) if transp_progress else n_lines + 1
 
     # Pre-compute center indices for all lines
     # This is used for KAPMIN = CONTINUUM(center_idx) * CUTOFF (matches Fortran exactly)
@@ -604,6 +687,10 @@ def compute_transp(
     # Cache population computations per element to avoid redundant calculations
     # Format: {element: (pop_densities, dop_velocity)}
     population_cache: Dict[str, Tuple[np.ndarray, np.ndarray]] = {}
+    # Runtime cross-check cache for Saha-based populations (debug instrumentation only).
+    population_saha_cache: Dict[str, np.ndarray] = {}
+    logged_population_probe_keys: set[Tuple[str, int, int, int]] = set()
+    logged_fortran_probe_keys: set[Tuple[int, int, str]] = set()
 
     # DEBUG: Track cutoff statistics for diagnosis
     debug_stats = {
@@ -636,6 +723,44 @@ def compute_transp(
             debug_transp_depth_idx = None
 
     include_h_lines = os.getenv("PY_INCLUDE_H_LINES") == "1"
+    agent_run_id = os.getenv("PY_AGENT_DEBUG_RUN_ID", "")
+    probe_depths = (0, max(0, n_depths - 1))
+    transp_probe: Dict[Tuple[float, int], Dict[str, object]] = {}
+    center_probe_depths = tuple(sorted({0, max(0, n_depths // 2), max(0, n_depths - 1)}))
+    target_center_idx: Dict[float, int] = {}
+    center_probe: Dict[Tuple[float, int], Dict[str, object]] = {}
+    if agent_run_id:
+        for tw in _AGENT_DEBUG_TARGET_WAVELENGTHS:
+            idx_target = int(np.argmin(np.abs(wavelength_grid - tw)))
+            if abs(float(wavelength_grid[idx_target]) - float(tw)) <= _AGENT_DEBUG_WAVELENGTH_TOL:
+                target_center_idx[float(tw)] = int(idx_target)
+            for d_idx in probe_depths:
+                transp_probe[(float(tw), int(d_idx))] = {
+                    "lineCandidates": 0,
+                    "prePassCount": 0,
+                    "postPassCount": 0,
+                    "kapcenSum": 0.0,
+                    "kapcenMax": 0.0,
+                    "kapminMin": float("inf"),
+                    "kapminMax": 0.0,
+                    "topKappaPost": 0.0,
+                    "topPostLine": {},
+                    "topKapcenLine": {},
+                }
+            for d_idx in center_probe_depths:
+                center_probe[(float(tw), int(d_idx))] = {
+                    "centerLineCount": 0,
+                    "prePassCount": 0,
+                    "postPassCount": 0,
+                    "topPreLine": {},
+                    "topPostLine": {},
+                    "topFailedPreLine": {},
+                    "topFailedPostLine": {},
+                    "topPreValue": 0.0,
+                    "topPostValue": 0.0,
+                    "topFailedPreValue": 0.0,
+                    "topFailedPostValue": 0.0,
+                }
 
     # Process each line
     for line_idx in range(n_lines):
@@ -647,12 +772,83 @@ def compute_transp(
         record = catalog.records[line_idx]
         element = record.element
         nelion = record.ion_stage
+        probe_target_wave = None
+        probe_line_wave = (
+            float(index_wavelength[line_idx])
+            if index_wavelength is not None
+            else float(record.wavelength)
+        )
+        line_type_code = int(getattr(record, "line_type", 0) or 0)
+        n_lower_abs = abs(int(getattr(record, "n_lower", 0) or 0))
+        n_upper_abs = abs(int(getattr(record, "n_upper", 0) or 0))
+        nb_sum = n_lower_abs + n_upper_abs
+        # Match rgfall fort.12 routing exactly:
+        # keep only plain lines (TYPE != 1, TYPE <= 3, TYPE != 2, NBLO+NBUP == 0).
+        routes_to_fort12 = bool(
+            line_type_code != 2
+            and line_type_code != 1
+            and line_type_code <= 3
+            and nb_sum == 0
+        )
+        routes_to_fort19 = bool(
+            line_type_code == 1 or line_type_code > 3 or nb_sum != 0
+        )
+        fortran_probe_target = None
+        if agent_run_id:
+            nearest_fortran_target = min(
+                _AGENT_DEBUG_FORTRAN_LINE_WAVELENGTHS,
+                key=lambda w: abs(float(record.wavelength) - float(w)),
+            )
+            if (
+                abs(float(record.wavelength) - float(nearest_fortran_target))
+                <= _AGENT_DEBUG_FORTRAN_LINE_TOL
+            ):
+                fortran_probe_target = float(nearest_fortran_target)
+        line_center_idx = int(center_indices[line_idx])
+        if agent_run_id:
+            nearest_target = min(
+                _AGENT_DEBUG_TARGET_WAVELENGTHS,
+                key=lambda w: abs(probe_line_wave - w),
+            )
+            if abs(probe_line_wave - nearest_target) <= _AGENT_DEBUG_WAVELENGTH_TOL:
+                probe_target_wave = float(nearest_target)
 
         # Hydrogen lines are handled with HPROF4-style profiles elsewhere unless overridden.
         if not include_h_lines and (
             record.line_type == -1
             or (str(element).strip().upper() in {"H", "H I", "HI"} and nelion == 1)
         ):
+            continue
+
+        # Match rgfall fort.12 routing exactly:
+        # keep only plain lines (TYPE != 1, TYPE <= 3, TYPE != 2, NBLO+NBUP == 0).
+        if not routes_to_fort12:
+            # #region agent log H38
+            if agent_run_id and fortran_probe_target is not None:
+                probe_key = (int(line_idx), -1, "route_skip")
+                if probe_key not in logged_fortran_probe_keys:
+                    logged_fortran_probe_keys.add(probe_key)
+                    _agent_write_log(
+                        run_id=agent_run_id,
+                        hypothesis_id="H38",
+                        location="synthe_py/physics/line_opacity.py:compute_transp:fortran_route_skip",
+                        message="Fortran-route line skipped before TRANSP (non-fort12)",
+                        data={
+                            "targetLineNm": float(fortran_probe_target),
+                            "lineIndex": int(line_idx),
+                            "lineWavelengthNm": float(record.wavelength),
+                            "indexWavelengthNm": float(probe_line_wave),
+                            "element": str(element),
+                            "ionStage": int(nelion),
+                            "lineType": int(line_type_code),
+                            "nLower": int(getattr(record, "n_lower", 0) or 0),
+                            "nUpper": int(getattr(record, "n_upper", 0) or 0),
+                            "routesToFort12": bool(routes_to_fort12),
+                            "routesToFort19": bool(routes_to_fort19),
+                            "decision": "skip_non_fort12_route",
+                        },
+                    )
+            # #endregion
             continue
 
         # CRITICAL FIX: Use pre-computed QXNFPEL and QDOPPLE from NPZ (matching Fortran fort.10)
@@ -717,6 +913,86 @@ def compute_transp(
                 if microturb_kms > 0.0:
                     micro = microturb_kms / C_LIGHT_KM
                     dop_val = math.sqrt(dop_val * dop_val + micro * micro)
+
+                # #region agent log H36
+                if (
+                    agent_run_id
+                    and probe_target_wave is not None
+                    and depth_idx in (0, n_depths // 2, n_depths - 1)
+                    and element in {"Si", "P", "He"}
+                ):
+                    probe_key = (
+                        str(element),
+                        int(nelion),
+                        int(depth_idx),
+                        int(round(probe_target_wave * 1000.0)),
+                    )
+                    if probe_key not in logged_population_probe_keys:
+                        logged_population_probe_keys.add(probe_key)
+                        if element not in population_saha_cache:
+                            try:
+                                from . import populations_saha as _populations_saha
+
+                                population_saha_cache[element] = (
+                                    _populations_saha.compute_population_densities(
+                                        atmosphere,
+                                        str(element),
+                                        max_ion_stage=int(pop_densities.shape[1]),
+                                    )
+                                )
+                            except Exception:
+                                population_saha_cache[element] = np.zeros((0, 0), dtype=np.float64)
+                        pop_saha = None
+                        saha_vals = population_saha_cache[element]
+                        if (
+                            isinstance(saha_vals, np.ndarray)
+                            and saha_vals.ndim == 2
+                            and depth_idx < saha_vals.shape[0]
+                            and nelion <= saha_vals.shape[1]
+                        ):
+                            pop_saha = float(saha_vals[depth_idx, nelion - 1])
+                        rho_probe = (
+                            atmosphere.mass_density[depth_idx]
+                            if hasattr(atmosphere, "mass_density")
+                            and atmosphere.mass_density is not None
+                            else 1.0
+                        )
+                        xnfdop_npz = None
+                        xnfdop_saha = None
+                        if pop_val > 0.0 and dop_val > 0.0 and rho_probe > 0.0:
+                            xnfdop_npz = float(pop_val / (rho_probe * dop_val))
+                        if (
+                            pop_saha is not None
+                            and pop_saha > 0.0
+                            and dop_val > 0.0
+                            and rho_probe > 0.0
+                        ):
+                            xnfdop_saha = float(pop_saha / (rho_probe * dop_val))
+                        _agent_write_log(
+                            run_id=agent_run_id,
+                            hypothesis_id="H36",
+                            location="line_opacity.py:compute_transp:population_probe",
+                            message="NPZ-vs-Saha population comparison at hot-band target",
+                            data={
+                                "targetWaveNm": float(probe_target_wave),
+                                "lineWaveNm": float(probe_line_wave),
+                                "element": str(element),
+                                "ionStage": int(nelion),
+                                "depthIndex": int(depth_idx),
+                                "popFromNpz": float(pop_val),
+                                "popFromSaha": pop_saha,
+                                "doppler": float(dop_val),
+                                "rho": float(rho_probe),
+                                "xnfdopFromNpz": xnfdop_npz,
+                                "xnfdopFromSaha": xnfdop_saha,
+                                "npzToSahaPopRatio": (
+                                    float(pop_val / pop_saha)
+                                    if pop_saha is not None and pop_saha != 0.0
+                                    else None
+                                ),
+                            },
+                        )
+                # #endregion
 
                 if pop_val > 0.0 and dop_val > 0.0:
                     # CRITICAL FIX: Match Fortran synthe.for line 240 exactly
@@ -873,13 +1149,167 @@ def compute_transp(
                     f"kapmin={kapmin:.6e}"
                 )
 
+            post_candidate = kappa0_pre_boltz * boltz
+            if agent_run_id and depth_idx in center_probe_depths:
+                for target_wave, idx_target in target_center_idx.items():
+                    if line_center_idx != int(idx_target):
+                        continue
+                    probe_key = (float(target_wave), int(depth_idx))
+                    probe_entry = center_probe.get(probe_key)
+                    if probe_entry is None:
+                        continue
+                    pre_ok = bool(kappa0_pre_boltz >= kapmin)
+                    post_ok = bool(post_candidate >= kapmin)
+                    probe_entry["centerLineCount"] = int(probe_entry["centerLineCount"]) + 1
+                    probe_entry["prePassCount"] = int(probe_entry["prePassCount"]) + int(pre_ok)
+                    probe_entry["postPassCount"] = int(probe_entry["postPassCount"]) + int(post_ok)
+                    if kappa0_pre_boltz > float(probe_entry["topPreValue"]):
+                        probe_entry["topPreValue"] = float(kappa0_pre_boltz)
+                        probe_entry["topPreLine"] = {
+                            "lineIndex": int(line_idx),
+                            "lineWavelengthNm": float(record.wavelength),
+                            "indexWavelengthNm": float(probe_line_wave),
+                            "element": str(element),
+                            "ionStage": int(nelion),
+                            "lineType": int(getattr(record, "line_type", 0) or 0),
+                            "logGf": float(record.log_gf),
+                            "excitationEnergyCm": float(record.excitation_energy),
+                            "boltz": float(boltz),
+                            "kappaPre": float(kappa0_pre_boltz),
+                            "kapmin": float(kapmin),
+                        }
+                    if post_candidate > float(probe_entry["topPostValue"]):
+                        probe_entry["topPostValue"] = float(post_candidate)
+                        probe_entry["topPostLine"] = {
+                            "lineIndex": int(line_idx),
+                            "lineWavelengthNm": float(record.wavelength),
+                            "indexWavelengthNm": float(probe_line_wave),
+                            "element": str(element),
+                            "ionStage": int(nelion),
+                            "lineType": int(getattr(record, "line_type", 0) or 0),
+                            "logGf": float(record.log_gf),
+                            "excitationEnergyCm": float(record.excitation_energy),
+                            "boltz": float(boltz),
+                            "kappaPost": float(post_candidate),
+                            "kapmin": float(kapmin),
+                        }
+                    if (not pre_ok) and kappa0_pre_boltz > float(
+                        probe_entry["topFailedPreValue"]
+                    ):
+                        probe_entry["topFailedPreValue"] = float(kappa0_pre_boltz)
+                        probe_entry["topFailedPreLine"] = {
+                            "lineIndex": int(line_idx),
+                            "lineWavelengthNm": float(record.wavelength),
+                            "indexWavelengthNm": float(probe_line_wave),
+                            "element": str(element),
+                            "ionStage": int(nelion),
+                            "lineType": int(getattr(record, "line_type", 0) or 0),
+                            "logGf": float(record.log_gf),
+                            "excitationEnergyCm": float(record.excitation_energy),
+                            "boltz": float(boltz),
+                            "kappaPre": float(kappa0_pre_boltz),
+                            "kapmin": float(kapmin),
+                        }
+                    if pre_ok and (not post_ok) and post_candidate > float(
+                        probe_entry["topFailedPostValue"]
+                    ):
+                        probe_entry["topFailedPostValue"] = float(post_candidate)
+                        probe_entry["topFailedPostLine"] = {
+                            "lineIndex": int(line_idx),
+                            "lineWavelengthNm": float(record.wavelength),
+                            "indexWavelengthNm": float(probe_line_wave),
+                            "element": str(element),
+                            "ionStage": int(nelion),
+                            "lineType": int(getattr(record, "line_type", 0) or 0),
+                            "logGf": float(record.log_gf),
+                            "excitationEnergyCm": float(record.excitation_energy),
+                            "boltz": float(boltz),
+                            "kappaPost": float(post_candidate),
+                            "kapmin": float(kapmin),
+                        }
+            if (
+                agent_run_id
+                and probe_target_wave is not None
+                and depth_idx in probe_depths
+            ):
+                probe_key = (probe_target_wave, int(depth_idx))
+                probe_entry = transp_probe.get(probe_key)
+                if probe_entry is not None:
+                    pre_ok = bool(kappa0_pre_boltz >= kapmin)
+                    post_ok = bool(post_candidate >= kapmin)
+                    probe_entry["lineCandidates"] = int(probe_entry["lineCandidates"]) + 1
+                    probe_entry["prePassCount"] = int(probe_entry["prePassCount"]) + int(
+                        pre_ok
+                    )
+                    probe_entry["postPassCount"] = int(
+                        probe_entry["postPassCount"]
+                    ) + int(post_ok)
+                    probe_entry["kapminMin"] = min(
+                        float(probe_entry["kapminMin"]), float(kapmin)
+                    )
+                    probe_entry["kapminMax"] = max(
+                        float(probe_entry["kapminMax"]), float(kapmin)
+                    )
+                    if post_ok and post_candidate > float(probe_entry["topKappaPost"]):
+                        probe_entry["topKappaPost"] = float(post_candidate)
+                        probe_entry["topPostLine"] = {
+                            "lineWavelengthNm": float(record.wavelength),
+                            "indexWavelengthNm": float(probe_line_wave),
+                            "element": str(element),
+                            "ionStage": int(nelion),
+                            "lineType": int(getattr(record, "line_type", 0) or 0),
+                            "logGf": float(record.log_gf),
+                            "excitationEnergyCm": float(record.excitation_energy),
+                            "boltz": float(boltz),
+                            "kappaPost": float(post_candidate),
+                            "kapmin": float(kapmin),
+                        }
+
             if kappa0_pre_boltz < kapmin:
+                # #region agent log H38
+                if (
+                    agent_run_id
+                    and fortran_probe_target is not None
+                    and depth_idx in center_probe_depths
+                ):
+                    probe_key = (int(line_idx), int(depth_idx), "pre_fail")
+                    if probe_key not in logged_fortran_probe_keys:
+                        logged_fortran_probe_keys.add(probe_key)
+                        _agent_write_log(
+                            run_id=agent_run_id,
+                            hypothesis_id="H38",
+                            location="synthe_py/physics/line_opacity.py:compute_transp:fortran_route_probe_pre",
+                            message="Fortran-route line check at pre-Boltzmann cutoff",
+                            data={
+                                "targetLineNm": float(fortran_probe_target),
+                                "lineIndex": int(line_idx),
+                                "lineWavelengthNm": float(record.wavelength),
+                                "indexWavelengthNm": float(probe_line_wave),
+                                "depthIndex": int(depth_idx),
+                                "element": str(element),
+                                "ionStage": int(nelion),
+                                "lineType": int(line_type_code),
+                                "nLower": int(getattr(record, "n_lower", 0) or 0),
+                                "nUpper": int(getattr(record, "n_upper", 0) or 0),
+                                "routesToFort12": bool(routes_to_fort12),
+                                "routesToFort19": bool(routes_to_fort19),
+                                "kappa0Pre": float(kappa0_pre_boltz),
+                                "kappa0Post": float(post_candidate),
+                                "kapmin": float(kapmin),
+                                "boltz": float(boltz),
+                                "xnfdop": float(xnfdop),
+                                "cgf": float(cgf),
+                                "centerIndex": int(line_center_idx),
+                                "decision": "fail_pre_cutoff",
+                            },
+                        )
+                # #endregion
                 if depth_idx == 0:
                     debug_stats["skipped_pre_boltz"] += 1
                 continue  # Skip weak lines (matches Fortran cutoff behavior)
 
             # Apply Boltzmann factor AFTER pre-Boltzmann cutoff (Fortran line 268-270)
-            kappa0 = kappa0_pre_boltz * boltz
+            kappa0 = post_candidate
 
             # POST-BOLTZMANN CUTOFF CHECK (Fortran line 272)
             # RE-ENABLED: This matches Fortran behavior and prevents weak line accumulation
@@ -896,6 +1326,44 @@ def compute_transp(
                 )
 
             if kappa0 < kapmin:
+                # #region agent log H38
+                if (
+                    agent_run_id
+                    and fortran_probe_target is not None
+                    and depth_idx in center_probe_depths
+                ):
+                    probe_key = (int(line_idx), int(depth_idx), "post_fail")
+                    if probe_key not in logged_fortran_probe_keys:
+                        logged_fortran_probe_keys.add(probe_key)
+                        _agent_write_log(
+                            run_id=agent_run_id,
+                            hypothesis_id="H38",
+                            location="synthe_py/physics/line_opacity.py:compute_transp:fortran_route_probe_post",
+                            message="Fortran-route line check at post-Boltzmann cutoff",
+                            data={
+                                "targetLineNm": float(fortran_probe_target),
+                                "lineIndex": int(line_idx),
+                                "lineWavelengthNm": float(record.wavelength),
+                                "indexWavelengthNm": float(probe_line_wave),
+                                "depthIndex": int(depth_idx),
+                                "element": str(element),
+                                "ionStage": int(nelion),
+                                "lineType": int(line_type_code),
+                                "nLower": int(getattr(record, "n_lower", 0) or 0),
+                                "nUpper": int(getattr(record, "n_upper", 0) or 0),
+                                "routesToFort12": bool(routes_to_fort12),
+                                "routesToFort19": bool(routes_to_fort19),
+                                "kappa0Pre": float(kappa0_pre_boltz),
+                                "kappa0Post": float(kappa0),
+                                "kapmin": float(kapmin),
+                                "boltz": float(boltz),
+                                "xnfdop": float(xnfdop),
+                                "cgf": float(cgf),
+                                "centerIndex": int(line_center_idx),
+                                "decision": "fail_post_cutoff",
+                            },
+                        )
+                # #endregion
                 if depth_idx == 0:
                     debug_stats["skipped_post_boltz"] += 1
                 continue
@@ -1022,6 +1490,71 @@ def compute_transp(
                 # Store result
                 transp[line_idx, depth_idx] = kapcen
                 valid_mask[line_idx, depth_idx] = True
+                # #region agent log H38
+                if (
+                    agent_run_id
+                    and fortran_probe_target is not None
+                    and depth_idx in center_probe_depths
+                ):
+                    probe_key = (int(line_idx), int(depth_idx), "pass")
+                    if probe_key not in logged_fortran_probe_keys:
+                        logged_fortran_probe_keys.add(probe_key)
+                        _agent_write_log(
+                            run_id=agent_run_id,
+                            hypothesis_id="H38",
+                            location="synthe_py/physics/line_opacity.py:compute_transp:fortran_route_probe_pass",
+                            message="Fortran-route line check after TRANSP pass",
+                            data={
+                                "targetLineNm": float(fortran_probe_target),
+                                "lineIndex": int(line_idx),
+                                "lineWavelengthNm": float(record.wavelength),
+                                "indexWavelengthNm": float(probe_line_wave),
+                                "depthIndex": int(depth_idx),
+                                "element": str(element),
+                                "ionStage": int(nelion),
+                                "lineType": int(line_type_code),
+                                "nLower": int(getattr(record, "n_lower", 0) or 0),
+                                "nUpper": int(getattr(record, "n_upper", 0) or 0),
+                                "routesToFort12": bool(routes_to_fort12),
+                                "routesToFort19": bool(routes_to_fort19),
+                                "kappa0Pre": float(kappa0_pre_boltz),
+                                "kappa0Post": float(kappa0),
+                                "kapcen": float(kapcen),
+                                "kapmin": float(kapmin),
+                                "adamp": float(adamp),
+                                "boltz": float(boltz),
+                                "xnfdop": float(xnfdop),
+                                "cgf": float(cgf),
+                                "centerIndex": int(line_center_idx),
+                                "decision": "pass_transp",
+                            },
+                        )
+                # #endregion
+                if (
+                    agent_run_id
+                    and probe_target_wave is not None
+                    and depth_idx in probe_depths
+                ):
+                    probe_key = (probe_target_wave, int(depth_idx))
+                    probe_entry = transp_probe.get(probe_key)
+                    if probe_entry is not None:
+                        probe_entry["kapcenSum"] = float(probe_entry["kapcenSum"]) + float(
+                            kapcen
+                        )
+                        if kapcen > float(probe_entry["kapcenMax"]):
+                            probe_entry["kapcenMax"] = float(kapcen)
+                            probe_entry["topKapcenLine"] = {
+                                "lineWavelengthNm": float(record.wavelength),
+                                "indexWavelengthNm": float(probe_line_wave),
+                                "element": str(element),
+                                "ionStage": int(nelion),
+                                "lineType": int(getattr(record, "line_type", 0) or 0),
+                                "logGf": float(record.log_gf),
+                                "excitationEnergyCm": float(record.excitation_energy),
+                                "boltz": float(boltz),
+                                "kapcen": float(kapcen),
+                                "adamp": float(adamp),
+                            }
 
                 # DEBUG: Track very large TRANSP values
                 if kapcen > 1e10 and line_idx < 10 and depth_idx == 0:
@@ -1074,6 +1607,64 @@ def compute_transp(
             f"  KAPPA0 at 300nm (passed): min={min(debug_stats['kappa0_at_300nm']):.4e}, max={max(debug_stats['kappa0_at_300nm']):.4e}"
         )
     print("=" * 70 + "\n")
+
+    if agent_run_id:
+        for target_wave in _AGENT_DEBUG_TARGET_WAVELENGTHS:
+            for d_idx in probe_depths:
+                probe_key = (float(target_wave), int(d_idx))
+                probe_entry = transp_probe.get(probe_key)
+                if probe_entry is None:
+                    continue
+                if int(probe_entry["lineCandidates"]) <= 0:
+                    continue
+                # region agent log
+                _agent_write_log(
+                    run_id=agent_run_id,
+                    hypothesis_id="H17",
+                    location="synthe_py/physics/line_opacity.py:transp_cutoff_target_summary",
+                    message="Target-band TRANSP cutoff/survival summary",
+                    data={
+                        "targetWaveNm": float(target_wave),
+                        "depthIndex": int(d_idx),
+                        "lineCandidates": int(probe_entry["lineCandidates"]),
+                        "prePassCount": int(probe_entry["prePassCount"]),
+                        "postPassCount": int(probe_entry["postPassCount"]),
+                        "kapcenSum": float(probe_entry["kapcenSum"]),
+                        "kapcenMax": float(probe_entry["kapcenMax"]),
+                        "kapminMin": float(probe_entry["kapminMin"]),
+                        "kapminMax": float(probe_entry["kapminMax"]),
+                        "topPostLine": dict(probe_entry["topPostLine"]),
+                        "topKapcenLine": dict(probe_entry["topKapcenLine"]),
+                    },
+                )
+                # endregion
+            for d_idx in center_probe_depths:
+                probe_key = (float(target_wave), int(d_idx))
+                probe_entry = center_probe.get(probe_key)
+                if probe_entry is None:
+                    continue
+                if int(probe_entry["centerLineCount"]) <= 0:
+                    continue
+                # region agent log
+                _agent_write_log(
+                    run_id=agent_run_id,
+                    hypothesis_id="H21",
+                    location="synthe_py/physics/line_opacity.py:transp_centerline_target_summary",
+                    message="Target-bin center-line TRANSP cutoff balance",
+                    data={
+                        "targetWaveNm": float(target_wave),
+                        "targetGridIndex": int(target_center_idx.get(float(target_wave), -1)),
+                        "depthIndex": int(d_idx),
+                        "centerLineCount": int(probe_entry["centerLineCount"]),
+                        "prePassCount": int(probe_entry["prePassCount"]),
+                        "postPassCount": int(probe_entry["postPassCount"]),
+                        "topPreLine": dict(probe_entry["topPreLine"]),
+                        "topPostLine": dict(probe_entry["topPostLine"]),
+                        "topFailedPreLine": dict(probe_entry["topFailedPreLine"]),
+                        "topFailedPostLine": dict(probe_entry["topFailedPostLine"]),
+                    },
+                )
+                # endregion
 
     # Return pre-computed center indices for wing and center accumulation.
     # These are computed using Fortran's logarithmic rounding on the wavelength grid.
@@ -1216,6 +1807,7 @@ def compute_asynth_from_transp(
 
     # Initialize ASYNTH array
     asynth = np.zeros((n_depths, n_wavelengths), dtype=np.float64)
+    agent_run_id = os.getenv("PY_AGENT_DEBUG_RUN_ID", "")
 
     # CRITICAL FIX: Match Fortran frequency calculation exactly
     # Fortran line 369: FREQ=2.99792458D17/WAVE (WAVE in nm, result in Hz)
@@ -1304,16 +1896,15 @@ def compute_asynth_from_transp(
     )
 
     # Add center contributions first (TRANSP only; stim applied after wing accumulation).
-    # CRITICAL FIX: Skip fort.19 special lines (line_type != 0) here.
-    # Hydrogen (type -1/-2) → handled by _compute_hydrogen_line_opacity
-    # Autoionizing (type 1) → handled by _add_fort19_asynth
-    # Helium (type -3/-6) → handled by helium wings path
-    # Adding them here would DOUBLE-COUNT their center opacity.
+    # Hydrogen and fort.19 special classes are handled in dedicated paths.
+    # Keep helium center opacity here so strong He lines are not dropped when
+    # wing tails are delegated to the dedicated helium wing path.
     asynth_per_line = transp  # Shape: (n_lines, n_depths)
     for line_idx in range(len(catalog.records)):
         rec = catalog.records[line_idx]
-        if int(getattr(rec, "line_type", 0) or 0) != 0:
-            continue  # Skip fort.19 special lines
+        line_type = int(getattr(rec, "line_type", 0) or 0)
+        if line_type in (-2, -1, 1, 2, 3, 4):
+            continue  # Skip dedicated non-Voigt classes
         center_idx = line_indices[line_idx]
         if center_idx >= 0 and center_idx < n_wavelengths:
             for depth_idx in range(n_depths):
@@ -1549,6 +2140,293 @@ def compute_asynth_from_transp(
                         wcon_array[idx_wcon] = wcon
                         if wtail is not None and wtail > 0.0:
                             wtail_array[idx_wcon] = wtail
+
+        # Targeted wing-reach diagnostics to explain missing band absorption.
+        if agent_run_id and n_wavelengths > 0 and n_lines > 0:
+            probe_depths = tuple(
+                sorted({0, max(0, n_depths // 2), max(0, n_depths - 1)})
+            )
+            resolu_local = 300000.0
+            if n_wavelengths > 1:
+                ratio_local = wavelength_grid[1] / wavelength_grid[0]
+                if ratio_local > 1.0:
+                    resolu_local = 1.0 / (ratio_local - 1.0)
+            # region agent log H60/H61
+            hotspot_targets = (
+                357.11464700,
+                385.74893900,
+                396.26111000,
+                429.09423800,
+                636.36093300,
+                656.37297600,
+                656.59399200,
+            )
+            for target_wave in hotspot_targets:
+                idx_target = int(np.argmin(np.abs(wavelength_grid - target_wave)))
+                wave_at_target = float(wavelength_grid[idx_target])
+                if abs(wave_at_target - target_wave) > _AGENT_DEBUG_WAVELENGTH_TOL:
+                    continue
+                for depth_idx in probe_depths:
+                    # Summarize center-mapped TRANSP strength around the target bin.
+                    bin_summary = {}
+                    for rel in (-2, -1, 0, 1, 2):
+                        idx_bin = idx_target + rel
+                        if idx_bin < 0 or idx_bin >= n_wavelengths:
+                            continue
+                        mask = line_indices_wing == idx_bin
+                        if valid_mask is not None:
+                            mask = np.logical_and(mask, valid_mask[:, depth_idx])
+                        if not np.any(mask):
+                            continue
+                        vals = transp[mask, depth_idx]
+                        if vals.size == 0:
+                            continue
+                        top_local = int(np.argmax(vals))
+                        line_ids = np.where(mask)[0]
+                        top_line_idx = int(line_ids[top_local])
+                        top_rec = catalog.records[top_line_idx]
+                        bin_summary[str(rel)] = {
+                            "gridWaveNm": float(wavelength_grid[idx_bin]),
+                            "lineCount": int(vals.size),
+                            "sumTransp": float(np.sum(vals)),
+                            "maxTransp": float(np.max(vals)),
+                            "topLineIndex": top_line_idx,
+                            "topLineWavelengthNm": float(top_rec.wavelength),
+                            "topElement": str(top_rec.element),
+                            "topIonStage": int(top_rec.ion_stage),
+                            "topLineType": int(getattr(top_rec, "line_type", 0) or 0),
+                        }
+                    _agent_write_log(
+                        run_id=agent_run_id,
+                        hypothesis_id="H61",
+                        location="synthe_py/physics/line_opacity.py:compute_asynth_from_transp:center_bin_summary",
+                        message="Hotspot center-bin TRANSP mapping summary",
+                        data={
+                            "targetWaveNm": float(target_wave),
+                            "gridWaveNm": wave_at_target,
+                            "depthIndex": int(depth_idx),
+                            "binSummary": bin_summary,
+                        },
+                    )
+
+                    # Identify the strongest nearby candidate line and evaluate profile/cutoff terms.
+                    best_idx = -1
+                    best_transp = 0.0
+                    for line_idx in range(n_lines):
+                        if valid_mask is not None and not valid_mask[line_idx, depth_idx]:
+                            continue
+                        if abs(int(line_indices_wing[line_idx]) - idx_target) > 2:
+                            continue
+                        tv = float(transp[line_idx, depth_idx])
+                        if tv > best_transp:
+                            best_transp = tv
+                            best_idx = int(line_idx)
+                    if best_idx >= 0:
+                        center_idx = int(line_indices_wing[best_idx])
+                        offset = int(idx_target - center_idx)
+                        line_wl = float(catalog.records[best_idx].wavelength)
+                        kappa0 = float(kappa0_array[best_idx, depth_idx])
+                        adamp = float(adamp_array[best_idx, depth_idx])
+                        doppler_width = float(doppler_widths_array[best_idx, depth_idx])
+                        dopple = doppler_width / line_wl if line_wl > 0.0 else 0.0
+                        dvoigt = 1.0 / (dopple * resolu_local) if dopple > 0.0 else 0.0
+                        x_offset = float(abs(offset)) * dvoigt
+                        if adamp < 0.2:
+                            if x_offset > 10.0:
+                                profile_no_stim = kappa0 * (
+                                    0.5642 * adamp / max(x_offset * x_offset, 1e-40)
+                                )
+                            else:
+                                idx_tab = int(0.5 + 200.0 * dvoigt * float(abs(offset)))
+                                idx_tab = max(0, min(idx_tab, h0tab.size - 1))
+                                profile_no_stim = kappa0 * (
+                                    h0tab[idx_tab] + adamp * h1tab[idx_tab]
+                                )
+                        else:
+                            profile_no_stim = float(
+                                kappa0 * _voigt_profile_jit(x_offset, adamp, h0tab, h1tab, h2tab)
+                            )
+                        stim_target = float(stim_grid[depth_idx, idx_target])
+                        profile_with_stim = profile_no_stim * stim_target
+                        center_cut = float(kapmin_ref_array[best_idx, depth_idx])
+                        local_cut = (
+                            float(continuum_absorption[depth_idx, idx_target]) * cutoff
+                            if use_cutoff
+                            else 0.0
+                        )
+                        best_rec = catalog.records[best_idx]
+                        _agent_write_log(
+                            run_id=agent_run_id,
+                            hypothesis_id="H60",
+                            location="synthe_py/physics/line_opacity.py:compute_asynth_from_transp:hotspot_profile_probe",
+                            message="Hotspot dominant-line profile versus cutoff thresholds",
+                            data={
+                                "targetWaveNm": float(target_wave),
+                                "gridWaveNm": wave_at_target,
+                                "depthIndex": int(depth_idx),
+                                "lineIndex": int(best_idx),
+                                "lineWavelengthNm": line_wl,
+                                "centerIndex": int(center_idx),
+                                "offsetBins": int(offset),
+                                "element": str(best_rec.element),
+                                "ionStage": int(best_rec.ion_stage),
+                                "lineType": int(getattr(best_rec, "line_type", 0) or 0),
+                                "transpAtDepth": float(transp[best_idx, depth_idx]),
+                                "kappa0": float(kappa0),
+                                "adamp": float(adamp),
+                                "dopplerWidthNm": float(doppler_width),
+                                "dopple": float(dopple),
+                                "xOffset": float(x_offset),
+                                "stimAtTarget": float(stim_target),
+                                "profileNoStim": float(profile_no_stim),
+                                "profileWithStim": float(profile_with_stim),
+                                "centerCutoff": float(center_cut),
+                                "localCutoff": float(local_cut),
+                                "passesCenterCutoff": bool(profile_no_stim >= center_cut),
+                                "passesLocalCutoff": bool(profile_with_stim >= local_cut),
+                            },
+                        )
+            # endregion
+            for target_wave in _AGENT_DEBUG_TARGET_WAVELENGTHS:
+                idx_target = int(np.argmin(np.abs(wavelength_grid - target_wave)))
+                wave_at_target = float(wavelength_grid[idx_target])
+                if abs(wave_at_target - target_wave) > _AGENT_DEBUG_WAVELENGTH_TOL:
+                    continue
+                for depth_idx in probe_depths:
+                    candidates = 0
+                    reachable = 0
+                    blocked_maxstep = 0
+                    blocked_wcon = 0
+                    top_reach = {}
+                    top_reach_contrib = 0.0
+                    reach_entries = []
+                    top_block = {}
+                    top_block_kappa0 = 0.0
+                    for line_idx in range(n_lines):
+                        if valid_mask is not None and not valid_mask[line_idx, depth_idx]:
+                            continue
+                        kappa0 = float(kappa0_array[line_idx, depth_idx])
+                        if kappa0 <= 0.0:
+                            continue
+                        center_idx = int(line_indices_wing[line_idx])
+                        offset = idx_target - center_idx
+                        if abs(offset) > 250:
+                            continue
+                        candidates += 1
+                        line_wl = float(catalog.records[int(line_idx)].wavelength)
+                        doppler_width = float(doppler_widths_array[line_idx, depth_idx])
+                        if line_wl <= 0.0 or doppler_width <= 0.0:
+                            blocked_maxstep += 1
+                            continue
+                        dopple = doppler_width / line_wl
+                        adamp = float(adamp_array[line_idx, depth_idx])
+                        kapmin_ref = float(kapmin_ref_array[line_idx, depth_idx])
+                        profile_at_offset, n10dop_ft, maxstep_ft, _, _ = (
+                            _compute_fortran_profile_steps(
+                                offset=offset,
+                                kappa0=kappa0,
+                                adamp=adamp,
+                                dopple=dopple,
+                                resolu=resolu_local,
+                                kapmin_ref=kapmin_ref,
+                                h0tab=h0tab,
+                                h1tab=h1tab,
+                                h2tab=h2tab,
+                                max_profile_steps=int(MAX_PROFILE_STEPS),
+                            )
+                        )
+                        if profile_at_offset is None:
+                            blocked_maxstep += 1
+                            if kappa0 > top_block_kappa0:
+                                top_block_kappa0 = kappa0
+                                rec = catalog.records[int(line_idx)]
+                                top_block = {
+                                    "lineWavelengthNm": line_wl,
+                                    "element": str(rec.element),
+                                    "ionStage": int(rec.ion_stage),
+                                    "logGf": float(rec.log_gf),
+                                    "offset": int(offset),
+                                    "n10dop": int(n10dop_ft),
+                                    "maxstep": int(maxstep_ft),
+                                    "kappa0": kappa0,
+                                }
+                            continue
+                        idx_wcon = line_idx * n_depths + depth_idx
+                        wave_eval = wave_at_target
+                        wcon_val = (
+                            float(wcon_array[idx_wcon]) if idx_wcon < wcon_array.size else 0.0
+                        )
+                        wtail_val = (
+                            float(wtail_array[idx_wcon])
+                            if idx_wcon < wtail_array.size
+                            else 0.0
+                        )
+                        if wcon_val > 0.0 and wave_eval < wcon_val:
+                            blocked_wcon += 1
+                            continue
+                        value = float(profile_at_offset)
+                        if wtail_val > 0.0 and wcon_val > 0.0 and wave_eval < wtail_val:
+                            taper = (wave_eval - wcon_val) / max(wtail_val - wcon_val, 1e-10)
+                            value = value * taper
+                        if value > 0.0:
+                            reachable += 1
+                            reach_entries.append(
+                                (
+                                    float(value),
+                                    int(line_idx),
+                                    line_wl,
+                                    str(rec.element),
+                                    int(rec.ion_stage),
+                                    float(rec.log_gf),
+                                    int(getattr(rec, "line_type", 0) or 0),
+                                    int(offset),
+                                )
+                            )
+                            if value > top_reach_contrib:
+                                top_reach_contrib = value
+                                rec = catalog.records[int(line_idx)]
+                                top_reach = {
+                                    "lineWavelengthNm": line_wl,
+                                    "element": str(rec.element),
+                                    "ionStage": int(rec.ion_stage),
+                                    "logGf": float(rec.log_gf),
+                                    "offset": int(offset),
+                                    "kappaAtTarget": value,
+                                }
+                    reach_entries.sort(key=lambda item: item[0], reverse=True)
+                    top_reach_lines = [
+                        {
+                            "kappaAtTarget": float(item[0]),
+                            "lineIndex": int(item[1]),
+                            "lineWavelengthNm": float(item[2]),
+                            "element": str(item[3]),
+                            "ionStage": int(item[4]),
+                            "logGf": float(item[5]),
+                            "lineType": int(item[6]),
+                            "offset": int(item[7]),
+                        }
+                        for item in reach_entries[:5]
+                    ]
+                    # region agent log
+                    _agent_write_log(
+                        run_id=agent_run_id,
+                        hypothesis_id="H19",
+                        location="synthe_py/physics/line_opacity.py:wing_reach_summary",
+                        message="Target-bin wing reachability and block reasons",
+                        data={
+                            "targetWaveNm": float(target_wave),
+                            "waveAtGridNm": wave_at_target,
+                            "depthIndex": int(depth_idx),
+                            "candidateLinesWithinOffset250": int(candidates),
+                            "reachableLines": int(reachable),
+                            "blockedByMaxstep": int(blocked_maxstep),
+                            "blockedByWcon": int(blocked_wcon),
+                            "topReachLine": top_reach,
+                            "topReachLines": top_reach_lines,
+                            "topBlockedLine": top_block,
+                        },
+                    )
+                    # endregion
 
         # Optional debug: inspect wing reach for a specific line/wave/depth.
         debug_line_wl = os.getenv("PY_DEBUG_WING_LINE_WL")
@@ -2396,5 +3274,58 @@ def compute_asynth_from_transp(
                 )
         except ValueError:
             pass
+
+    if agent_run_id and n_wavelengths > 0:
+        for target_wave in _AGENT_DEBUG_TARGET_WAVELENGTHS:
+            idx_target = int(np.argmin(np.abs(wavelength_grid - target_wave)))
+            wave_at_idx = float(wavelength_grid[idx_target])
+            if abs(wave_at_idx - target_wave) > _AGENT_DEBUG_WAVELENGTH_TOL:
+                continue
+            center_mask = line_indices == idx_target
+            mid_idx = max(0, n_depths // 2)
+            if valid_mask is not None:
+                center_mask_d0 = center_mask & valid_mask[:, 0]
+                center_mask_dm = center_mask & valid_mask[:, mid_idx]
+                center_mask_dn = center_mask & valid_mask[:, n_depths - 1]
+            else:
+                center_mask_d0 = center_mask
+                center_mask_dm = center_mask
+                center_mask_dn = center_mask
+            center_sum_d0 = (
+                float(np.sum(transp[center_mask_d0, 0])) if np.any(center_mask_d0) else 0.0
+            )
+            center_sum_dm = (
+                float(np.sum(transp[center_mask_dm, mid_idx]))
+                if np.any(center_mask_dm)
+                else 0.0
+            )
+            center_sum_dn = (
+                float(np.sum(transp[center_mask_dn, n_depths - 1]))
+                if np.any(center_mask_dn)
+                else 0.0
+            )
+            # region agent log
+            _agent_write_log(
+                run_id=agent_run_id,
+                hypothesis_id="H18",
+                location="synthe_py/physics/line_opacity.py:asynth_center_vs_total",
+                message="ASYNTH target center-line contribution balance",
+                data={
+                    "targetWaveNm": float(target_wave),
+                    "waveAtGridNm": wave_at_idx,
+                    "gridIndex": int(idx_target),
+                    "centerLinesTotal": int(np.sum(center_mask)),
+                    "centerLinesValidDepth0": int(np.sum(center_mask_d0)),
+                    "centerLinesValidDepthMid": int(np.sum(center_mask_dm)),
+                    "centerLinesValidDepthLast": int(np.sum(center_mask_dn)),
+                    "centerTranspSumDepth0": center_sum_d0,
+                    "centerTranspSumDepthMid": center_sum_dm,
+                    "centerTranspSumDepthLast": center_sum_dn,
+                    "asynthDepth0": float(asynth[0, idx_target]),
+                    "asynthDepthMid": float(asynth[mid_idx, idx_target]),
+                    "asynthDepthLast": float(asynth[n_depths - 1, idx_target]),
+                },
+            )
+            # endregion
 
     return asynth

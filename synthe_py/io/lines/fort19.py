@@ -17,6 +17,7 @@ _RECORD_STRUCT = struct.Struct("<dffiiiiii fffii".replace(" ", ""))
 
 _C_LIGHT_NM = 2.99792458e17
 _CGF_FACTOR = 0.026538 / 1.77245
+FORT19_BUILD_LOGIC_VERSION = 2
 _CODEX = np.array(
     [1.0, 2.0, 2.01, 6.0, 6.01, 12.0, 12.01, 13.0, 13.01, 14.0, 14.01, 20.0, 20.01, 8.0, 11.0, 5.0, 19.0],
     dtype=np.float64,
@@ -347,20 +348,35 @@ def build_from_catalog(
         if not include:
             continue
 
+        freq_hz = _C_LIGHT_NM / max(wlvac, 1.0e-30)
+        denom = 12.5664 * freq_hz
         if line_type == 1 or line_type > 3:
-            gammar = rec.gamma_rad
+            # fort.19 TYPE=1 / TYPE>3 keep GAMMA* on the original (unnormalized)
+            # rgfall scale. The atomic parser stores normalized gamma values to
+            # match fort.12 usage, so recover raw fort.19 scale here.
+            gammar = (
+                10.0 ** rec.gamma_rad_log
+                if rec.gamma_rad_log != 0.0
+                else rec.gamma_rad * denom
+            )
             if rec.gamma_stark_log > 0.0:
-                gammas_linear = -10.0 ** (-rec.gamma_stark_log)
+                # rgfall.for line 170: AUTO with positive GS encodes negative ASHORE.
+                gammas = -10.0 ** (-rec.gamma_stark_log)
+            elif rec.gamma_stark_log < 0.0:
+                gammas = 10.0 ** rec.gamma_stark_log
             else:
-                gammas_linear = rec.gamma_stark
-            gammas = gammas_linear
-            gammaw = rec.gamma_vdw
+                gammas = rec.gamma_stark * denom
+            gammaw = (
+                10.0 ** rec.gamma_vdw_log
+                if rec.gamma_vdw_log != 0.0
+                else rec.gamma_vdw * denom
+            )
         else:
-            freq_hz = _C_LIGHT_NM / wlvac
-            denom = 12.5664 * freq_hz
-            gammar = rec.gamma_rad / denom
-            gammas = rec.gamma_stark / denom
-            gammaw = rec.gamma_vdw / denom
+            # fort.19 TYPE<=3 (except TYPE=1) uses normalized damping
+            # constants, same scale as fort.12.
+            gammar = rec.gamma_rad
+            gammas = rec.gamma_stark
+            gammaw = rec.gamma_vdw
 
         # rgfall.for EQUIVALENCE (GF,G,CGF): line 267 assignment to CGF
         # aliases GF for TYPE<=3 (except TYPE=1), before WRITE(19).
@@ -404,4 +420,4 @@ def build_from_catalog(
     )
 
 
-__all__ = ["Fort19Data", "Fort19WingType", "load"]
+__all__ = ["FORT19_BUILD_LOGIC_VERSION", "Fort19Data", "Fort19WingType", "load"]

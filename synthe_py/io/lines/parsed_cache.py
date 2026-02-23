@@ -19,7 +19,7 @@ import numpy as np
 from . import atomic
 
 _PARSED_CACHE_SCHEMA = 1
-PARSED_CACHE_LOGIC_VERSION = 1
+PARSED_CACHE_LOGIC_VERSION = 2
 
 
 @dataclass(frozen=True)

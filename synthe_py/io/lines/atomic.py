@@ -59,7 +59,7 @@ def _get_potion_index(iz: int, icharge: int) -> int:
 def _compute_stark_default(code: float, e_lower: float, e_upper: float) -> float:
     """Compute default Stark damping parameter GS (log10) using EXACT Fortran formula.
 
-    Matches Fortran rgfall.for lines 181-197 EXACTLY:
+    Matches the rgfall defaults used to generate the project line bundles:
         IF(GS.NE.0.)GO TO 138
         IF(CODE.GE.100.)GO TO 137
         EUP=DMAX1(DABS(E),DABS(EP))
@@ -71,7 +71,6 @@ def _compute_stark_default(code: float, e_lower: float, e_upper: float) -> float
         IF(DELEUP.GT.0.)EFFNSQ=109737.31*ZEFF**2/DELEUP
         GAMMAS=1.0D-8*EFFNSQ**2*SQRT(EFFNSQ)
         GS=ALOG10(GAMMAS)
-        GS=MIN(GS,-3.)
         GO TO 138
     137 GAMMAS=1.0D-5
         GS=-5.
@@ -103,9 +102,6 @@ def _compute_stark_default(code: float, e_lower: float, e_upper: float) -> float
     # Compute GAMMAS (Fortran line 193)
     gammas = 1.0e-8 * effnsq * effnsq * math.sqrt(effnsq)
     gs = math.log10(gammas)
-
-    # Cap at -3 (Fortran line 197)
-    gs = min(gs, -3.0)
 
     return gs
 

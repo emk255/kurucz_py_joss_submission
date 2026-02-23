@@ -692,6 +692,74 @@ COULFF_A_TABLE = np.array(
     dtype=np.float64,
 )
 
+# HOTOP transition table (atlas7v.for HOTOP DATA A1..A7, 60 entries × 7 fields):
+# (freq0, xsect, alpha, power, multiplier, excitation_eV, xNfpId)
+HOTOP_TRANSITIONS = np.array(
+    [
+        (4.149945e15, 6.900000e-18, 1.000000e00, 6.000000e00, 6.000000e00, 1.371000e01, 2.000000e00),
+        (4.574341e15, 2.500000e-18, 1.000000e00, 4.000000e00, 2.000000e00, 1.196000e01, 2.000000e00),
+        (5.220770e15, 1.080000e-17, 1.000000e00, 4.000000e00, 1.000000e01, 9.280000e00, 2.000000e00),
+        (5.222307e15, 5.350000e-18, 3.769000e00, 2.000000e00, 1.000000e00, 0.000000e00, 1.600000e01),
+        (5.892577e15, 4.600000e-18, 1.950000e00, 6.000000e00, 6.000000e00, 0.000000e00, 2.000000e00),
+        (6.177022e15, 3.500000e-18, 1.000000e00, 4.000000e00, 1.200000e01, 5.330000e00, 2.000000e00),
+        (6.181062e15, 6.750000e-18, 3.101000e00, 5.000000e00, 1.000000e00, 4.050000e00, 6.000000e00),
+        (6.701879e15, 6.650000e-18, 2.789000e00, 5.000000e00, 5.000000e00, 1.900000e00, 6.000000e00),
+        (7.158382e15, 6.650000e-18, 2.860000e00, 6.000000e00, 9.000000e00, 0.000000e00, 6.000000e00),
+        (7.284488e15, 3.430000e-18, 4.174000e00, 5.000000e00, 6.000000e00, 5.020000e00, 1.100000e01),
+        (7.693612e15, 3.530000e-18, 3.808000e00, 5.000000e00, 1.000000e01, 3.330000e00, 1.100000e01),
+        (7.885955e15, 2.320000e-18, 3.110000e00, 5.000000e00, 6.000000e00, 5.020000e00, 1.100000e01),
+        (8.295079e15, 3.970000e-18, 3.033000e00, 5.000000e00, 1.000000e01, 3.330000e00, 1.100000e01),
+        (8.497686e15, 7.320000e-18, 3.837000e00, 5.000000e00, 4.000000e00, 0.000000e00, 1.100000e01),
+        (8.509966e15, 2.000000e-18, 1.750000e00, 7.000000e00, 3.000000e00, 1.269000e01, 3.000000e00),
+        (8.572854e15, 1.680000e-18, 3.751000e00, 5.000000e00, 6.000000e00, 5.020000e00, 1.100000e01),
+        (9.906370e15, 4.160000e-18, 2.717000e00, 3.000000e00, 6.000000e00, 0.000000e00, 1.700000e01),
+        (1.000693e16, 2.400000e-18, 1.750000e00, 7.000000e00, 9.000000e00, 6.500000e00, 3.000000e00),
+        (1.046078e16, 4.800000e-18, 1.000000e00, 4.000000e00, 1.000000e01, 1.253000e01, 7.000000e00),
+        (1.067157e16, 2.710000e-18, 2.148000e00, 3.000000e00, 6.000000e00, 0.000000e00, 1.700000e01),
+        (1.146734e16, 2.060000e-18, 1.626000e00, 6.000000e00, 6.000000e00, 0.000000e00, 7.000000e00),
+        (1.156813e16, 5.200000e-19, 2.126000e00, 3.000000e00, 6.000000e00, 0.000000e00, 1.700000e01),
+        (1.157840e16, 9.100000e-19, 4.750000e00, 4.000000e00, 1.000000e00, 0.000000e00, 3.000000e00),
+        (1.177220e16, 5.300000e-18, 1.000000e00, 4.000000e00, 1.200000e01, 7.100000e00, 7.000000e00),
+        (1.198813e16, 3.970000e-18, 2.780000e00, 6.000000e00, 1.000000e00, 5.350000e00, 1.200000e01),
+        (1.325920e16, 3.790000e-18, 2.777000e00, 6.000000e00, 5.000000e00, 2.510000e00, 1.200000e01),
+        (1.327649e16, 3.650000e-18, 2.014000e00, 6.000000e00, 9.000000e00, 0.000000e00, 1.200000e01),
+        (1.361466e16, 7.000000e-18, 1.000000e00, 2.000000e00, 5.000000e00, 7.480000e00, 1.200000e01),
+        (1.365932e16, 9.300000e-19, 1.500000e00, 7.000000e00, 6.000000e00, 8.000000e00, 4.000000e00),
+        (1.481487e16, 1.100000e-18, 1.750000e00, 7.000000e00, 3.000000e00, 1.620000e01, 8.000000e00),
+        (1.490032e16, 5.490000e-18, 3.000000e00, 5.000000e00, 1.000000e00, 6.910000e00, 1.800000e01),
+        (1.533389e16, 1.800000e-18, 2.277000e00, 4.000000e00, 9.000000e00, 0.000000e00, 1.800000e01),
+        (1.559452e16, 8.700000e-19, 3.000000e00, 6.000000e00, 2.000000e00, 0.000000e00, 4.000000e00),
+        (1.579688e16, 4.170000e-18, 2.074000e00, 4.000000e00, 5.000000e00, 3.200000e00, 1.800000e01),
+        (1.643205e16, 1.390000e-18, 2.792000e00, 5.000000e00, 5.000000e00, 3.200000e00, 1.800000e01),
+        (1.656208e16, 2.500000e-18, 2.346000e00, 5.000000e00, 9.000000e00, 0.000000e00, 1.800000e01),
+        (1.671401e16, 1.300000e-18, 1.750000e00, 7.000000e00, 9.000000e00, 8.350000e00, 8.000000e00),
+        (1.719725e16, 1.480000e-18, 2.225000e00, 5.000000e00, 9.000000e00, 0.000000e00, 1.800000e01),
+        (1.737839e16, 2.700000e-18, 1.000000e00, 4.000000e00, 1.000000e01, 1.574000e01, 1.300000e01),
+        (1.871079e16, 1.270000e-18, 8.310000e-01, 6.000000e00, 6.000000e00, 0.000000e00, 1.300000e01),
+        (1.873298e16, 9.100000e-19, 3.000000e00, 4.000000e00, 1.000000e00, 0.000000e00, 8.000000e00),
+        (1.903597e16, 2.900000e-18, 1.000000e00, 4.000000e00, 1.200000e01, 8.880000e00, 1.300000e01),
+        (2.060738e16, 4.600000e-18, 1.000000e00, 3.000000e00, 1.200000e01, 2.284000e01, 1.900000e01),
+        (2.125492e16, 5.900000e-19, 1.000000e00, 6.000000e00, 6.000000e00, 9.990000e00, 9.000000e00),
+        (2.162610e16, 1.690000e-18, 1.937000e00, 5.000000e00, 6.000000e00, 7.710000e00, 1.900000e01),
+        (2.226127e16, 1.690000e-18, 1.841000e00, 5.000000e00, 1.000000e01, 5.080000e00, 1.900000e01),
+        (2.251163e16, 9.300000e-19, 2.455000e00, 6.000000e00, 6.000000e00, 7.710000e00, 1.900000e01),
+        (2.278001e16, 7.900000e-19, 1.000000e00, 6.000000e00, 9.000000e00, 1.020000e01, 1.400000e01),
+        (2.317678e16, 1.650000e-18, 2.277000e00, 6.000000e00, 1.000000e01, 5.080000e00, 1.900000e01),
+        (2.348946e16, 3.110000e-18, 1.963000e00, 6.000000e00, 4.000000e00, 0.000000e00, 1.900000e01),
+        (2.351911e16, 7.300000e-19, 1.486000e00, 5.000000e00, 6.000000e00, 7.710000e00, 1.900000e01),
+        (2.366973e16, 5.000000e-19, 1.000000e00, 4.000000e00, 2.000000e00, 0.000000e00, 9.000000e00),
+        (2.507544e16, 6.900000e-19, 1.000000e00, 6.000000e00, 3.000000e00, 1.969000e01, 1.400000e01),
+        (2.754065e16, 7.600000e-19, 1.000000e00, 2.000000e00, 1.000000e00, 0.000000e00, 1.400000e01),
+        (2.864850e16, 1.540000e-18, 2.104000e00, 6.000000e00, 1.000000e00, 7.920000e00, 2.000000e01),
+        (2.965598e16, 1.530000e-18, 2.021000e00, 6.000000e00, 5.000000e00, 3.760000e00, 2.000000e01),
+        (3.054151e16, 1.400000e-18, 1.471000e00, 6.000000e00, 9.000000e00, 0.000000e00, 2.000000e01),
+        (3.085141e16, 2.800000e-18, 1.000000e00, 4.000000e00, 5.000000e00, 1.101000e01, 2.000000e01),
+        (3.339687e16, 3.600000e-19, 1.000000e00, 6.000000e00, 2.000000e00, 0.000000e00, 1.500000e01),
+        (3.818757e16, 4.900000e-19, 1.145000e00, 6.000000e00, 6.000000e00, 0.000000e00, 2.100000e01),
+    ],
+    dtype=np.float64,
+)
+
 
 def _coulff(
     j: int,
@@ -754,6 +822,41 @@ def _coulff(
     )
 
     return coulff
+
+
+def _coulff_grid(nz: int, freqlg: np.ndarray, tlog: np.ndarray) -> np.ndarray:
+    """Vectorized COULFF over (layer, frequency_chunk) for HOTOP."""
+    if nz < 1 or nz > 6:
+        return np.ones((tlog.size, freqlg.size), dtype=np.float64)
+
+    z4log = COULFF_Z4LOG[nz - 1]
+    tlog_col = tlog[:, np.newaxis]
+    freqlg_row = freqlg[np.newaxis, :]
+
+    gamlog = 10.39638 - tlog_col / 1.15129 + z4log
+    hvktlg = (freqlg_row - tlog_col) / 1.15129 - 20.63764
+
+    igam = np.clip((gamlog + 7.0).astype(np.int64), 1, 10)
+    ihvkt = np.clip((hvktlg + 9.0).astype(np.int64), 1, 11)
+
+    p = gamlog - (igam - 7.0)
+    q = hvktlg - (ihvkt - 9.0)
+
+    ig = igam - 1
+    ih = ihvkt - 1
+
+    a00 = COULFF_A_TABLE[ig, ih]
+    a01_raw = COULFF_A_TABLE[ig, np.minimum(ih + 1, 10)]
+    a10_raw = COULFF_A_TABLE[np.minimum(ig + 1, 11), ih]
+    a11_raw = COULFF_A_TABLE[np.minimum(ig + 1, 11), np.minimum(ih + 1, 10)]
+
+    a01 = np.where(ihvkt < 11, a01_raw, a00)
+    a10 = np.where(igam < 10, a10_raw, a00)
+    a11 = np.where((igam < 10) & (ihvkt < 11), a11_raw, a00)
+
+    return (1.0 - p) * ((1.0 - q) * a00 + q * a01) + p * (
+        (1.0 - q) * a10 + q * a11
+    )
 
 
 def _linter(xold: np.ndarray, yold: np.ndarray, xnew: np.ndarray) -> np.ndarray:
@@ -5872,6 +5975,17 @@ def compute_kapp_continuum(
 
     # Compute Planck functions for all frequencies
     temp = np.asarray(atmosphere.temperature, dtype=np.float64)
+    pop = getattr(atmosphere, "population_per_ion", None)
+    has_pop_grid = (
+        pop is not None
+        and isinstance(pop, np.ndarray)
+        and pop.ndim == 3
+        and pop.shape[0] == n_layers
+    )
+    xnfphe_mode11 = None
+    if has_pop_grid and pop.shape[1] > 2 and pop.shape[2] > 1:
+        # Fortran XNFPHE from POPS(...,11): He I / He II / He III populations.
+        xnfphe_mode11 = np.column_stack([pop[:, 0, 1], pop[:, 1, 1], pop[:, 2, 1]])
     bnu_all = np.zeros((n_layers, nfreq), dtype=np.float64)
     for i, f in enumerate(freq):
         bnu_all[:, i] = _planck_nu(f, temp)
@@ -6280,23 +6394,25 @@ def compute_kapp_continuum(
     # HE1OP: Helium I opacity (atlas7v.for line 5499-5704)
     if atmosphere.xnf_he1 is not None:
         logger.info("Computing HE1OP (Helium I opacity)...")
-        xnfphe = np.asarray(atmosphere.xnf_he1, dtype=np.float64)
-        if xnfphe.ndim == 1:
-            xnfphe = xnfphe[:, np.newaxis]  # Make it 2D for consistency
+        if xnfphe_mode11 is not None:
+            xnfphe = xnfphe_mode11
+        else:
+            xnfphe = np.asarray(atmosphere.xnf_he1, dtype=np.float64)
+            if xnfphe.ndim == 1:
+                xnfphe = xnfphe[:, np.newaxis]  # fallback only
 
-        # xnfhe is for He II populations (needed for free-free)
+        # XNFHE is POPS(...,12): mode-12 helium populations used in HE1 free-free term.
         if not hasattr(atmosphere, "xnf_he2") or atmosphere.xnf_he2 is None:
             raise ValueError(
                 "Atmosphere model missing He II populations required by KAPP"
             )
-        xnfhe = np.asarray(atmosphere.xnf_he2, dtype=np.float64)
-        if xnfhe.ndim == 1:
-            xnfhe = xnfhe[:, np.newaxis]  # Make it 2D
-        if xnfhe.shape[1] < 2:
-            # Pad to 2 columns if needed
-            xnfhe_new = np.zeros((n_layers, 2), dtype=np.float64)
-            xnfhe_new[:, 0] = xnfhe[:, 0] if xnfhe.shape[1] > 0 else np.zeros(n_layers)
-            xnfhe = xnfhe_new
+        he1_mode12 = np.asarray(atmosphere.xnf_he1, dtype=np.float64)
+        he2_mode12 = np.asarray(atmosphere.xnf_he2, dtype=np.float64)
+        if he1_mode12.ndim > 1:
+            he1_mode12 = he1_mode12[:, 0]
+        if he2_mode12.ndim > 1:
+            he2_mode12 = he2_mode12[:, 0]
+        xnfhe = np.column_stack([he1_mode12, he2_mode12])
 
         bhe1 = atlas_tables.get("bhe1", np.ones((n_layers, 29), dtype=np.float64))
         bhe2 = atlas_tables.get("bhe2", np.ones((n_layers, 6), dtype=np.float64))
@@ -6779,9 +6895,16 @@ def compute_kapp_continuum(
     # HE2OP: Helium II opacity (atlas7v.for line 5705-5793)
     if atmosphere.xnf_he2 is not None:
         logger.info("Computing HE2OP (Helium II opacity)...")
-        xnfphe = np.asarray(atmosphere.xnf_he2, dtype=np.float64)
-        if xnfphe.ndim == 1:
-            xnfphe = xnfphe[:, np.newaxis]  # Make it 2D for consistency
+        if xnfphe_mode11 is not None:
+            xnfphe = xnfphe_mode11
+        else:
+            xnfphe = np.asarray(atmosphere.xnf_he2, dtype=np.float64)
+            if xnfphe.ndim == 1:
+                xnfphe = np.column_stack([np.zeros(n_layers), xnfphe, np.zeros(n_layers)])
+            elif xnfphe.shape[1] == 1:
+                xnfphe = np.column_stack([np.zeros(n_layers), xnfphe[:, 0], np.zeros(n_layers)])
+            elif xnfphe.shape[1] == 2:
+                xnfphe = np.column_stack([np.zeros(n_layers), xnfphe[:, 0], xnfphe[:, 1]])
         xnfphe3 = (
             xnfphe[:, 2]
             if xnfphe.shape[1] > 2
@@ -8174,6 +8297,23 @@ def compute_kapp_continuum(
     # Only computed if IFOP(10) = 1
     if ifop[9] == 1:  # IFOP(10) in Fortran = ifop[9] in Python (0-indexed)
         logger.info("Computing LUKEOP (N1, O1, Mg2, Si2, Ca2 opacity)...")
+        if has_pop_grid and pop.shape[1] > 1 and pop.shape[2] > 19:
+            # POPS grid is stored as [layer, ion_stage(0-based), element(0-based)].
+            # Map Fortran quantities: XNFPN, XNFPO, XNFPMG(II), XNFPSI(II), XNFPCA(II).
+            xnfpn = pop[:, 0, 6]
+            xnfpo = pop[:, 0, 7]
+            xnfpmg2 = pop[:, 1, 11]
+            xnfpsi2 = pop[:, 1, 13]
+            xnfpca2 = pop[:, 1, 19]
+        else:
+            logger.warning(
+                "LUKEOP enabled but population_per_ion is unavailable/incomplete; using zero LUKEOP to avoid non-Fortran placeholder opacity."
+            )
+            xnfpn = np.zeros(n_layers, dtype=np.float64)
+            xnfpo = np.zeros(n_layers, dtype=np.float64)
+            xnfpmg2 = np.zeros(n_layers, dtype=np.float64)
+            xnfpsi2 = np.zeros(n_layers, dtype=np.float64)
+            xnfpca2 = np.zeros(n_layers, dtype=np.float64)
 
         tkev = KBOLTZ_EV * temp  # eV (matches Fortran TKEV(J) = 8.6171D-5 * T(J))
 
@@ -8234,16 +8374,14 @@ def compute_kapp_continuum(
                 x1420 = _seaton(2.110779e15, 4.13e-18, 3.0, 0.69, f)
             ca2op = x1044 * 2.0 + x1218 * c1218 + x1420 * c1420  # (n_layers,)
 
-            # LUKEOP needs populations from POPS - use scaled abundances
-            # For now, estimate using solar abundances and ionization equilibrium
-            # N: Z=7, O: Z=8, Mg: Z=12, Si: Z=14, Ca: Z=20
-            # These are cross-section * population factors, so we scale by stim/rho
-            # In Fortran: ALUKE(J)=(N1OP*XNFPN+O1OP*XNFPO+MG2OP*XNFPMG+SI2OP*XNFPSI+CA2OP*XNFPCA)*STIM/RHO
-
-            # For now, set ALUKE using placeholder populations
-            # Full implementation would need POPS(7,1), POPS(8,1), etc.
-            # These contribute mainly in the UV at intermediate temperatures (5000-10000K)
-            aluke[:, j] = (n1op + o1op + mg2op + si2op + ca2op) * stim_j / rho
+            # Match Fortran LUKEOP weighting by ion populations.
+            aluke[:, j] = (
+                n1op * xnfpn
+                + o1op * xnfpo
+                + mg2op * xnfpmg2
+                + si2op * xnfpsi2
+                + ca2op * xnfpca2
+            ) * stim_j / rho
     else:
         logger.info("Skipping LUKEOP - IFOP(10)=0")
 
@@ -8253,16 +8391,75 @@ def compute_kapp_continuum(
     if ifop[10] == 1:  # IFOP(11) in Fortran = ifop[10] in Python (0-indexed)
         logger.info("Computing HOTOP (hot star opacity)...")
         xne = np.asarray(atmosphere.electron_density, dtype=np.float64)
+        tlog_arr = np.log(np.maximum(temp, 1e-10))
+        tkev = KBOLTZ_EV * temp
 
-        for j in range(nfreq):
-            f = freq[j]
-            stim_j = stim[:, j]
+        # Build HOTOP population vectors matching Fortran POPS calls:
+        # XNFP(1:4)=C I-IV, XNFP(5:9)=N I-V, XNFP(10:15)=O I-VI, XNFP(16:21)=Ne I-VI.
+        hotop_xnfp = np.zeros((n_layers, 21), dtype=np.float64)
+        xnf_sumqq = np.zeros((n_layers, 5), dtype=np.float64)
+        if has_pop_grid and pop.shape[1] > 5 and pop.shape[2] > 25:
+            hotop_xnfp[:, 0:4] = pop[:, 0:4, 5]
+            hotop_xnfp[:, 4:9] = pop[:, 0:5, 6]
+            hotop_xnfp[:, 9:15] = pop[:, 0:6, 7]
+            hotop_xnfp[:, 15:21] = pop[:, 0:6, 9]
 
-            # Free-free absorption (atlas7v.for line 9229-9233)
-            # AHOT = FREE * 3.6919E8 / FREQ^3 * XNE / sqrt(T)
-            # FREE = sum of COULFF * XNFSUMQQ for each ionization charge
-            # Simplified: use electron density and temperature
-            ahot[:, j] = 3.6919e8 / (f**3) * xne / np.sqrt(temp) * stim_j / rho
+            # XNFSUMQQ = sum_elements[ IZ^2 * XNF(IZ+1) ], IZ=1..5 (Fortran line 9281)
+            for elem_idx in (5, 6, 7, 9, 11, 13, 15, 25):  # C,N,O,Ne,Mg,Si,S,Fe
+                for iz in range(1, 6):
+                    xnf_sumqq[:, iz - 1] += (iz * iz) * pop[:, iz, elem_idx]
+        else:
+            logger.warning(
+                "HOTOP enabled but population_per_ion is unavailable/incomplete; using zero HOTOP populations."
+            )
+
+        sqrt_temp = np.sqrt(np.maximum(temp, 1e-30))
+        exp_hot = np.exp(
+            -HOTOP_TRANSITIONS[:, 5][np.newaxis, :] / np.maximum(tkev[:, np.newaxis], 1e-30)
+        )
+        hot_id_idx = np.clip(HOTOP_TRANSITIONS[:, 6].astype(np.int64) - 1, 0, 20)
+        chunk = 4096
+
+        for i0 in range(0, nfreq, chunk):
+            i1 = min(i0 + chunk, nfreq)
+            f_chunk = freq[i0:i1]
+            stim_chunk = stim[:, i0:i1]
+            freqlg_chunk = np.log(f_chunk)
+
+            # FREE = sum_q COULFF(q) * XNFSUMQQ(q), q=1..5 (atlas7v.for line 9286-9288)
+            free = np.zeros((n_layers, f_chunk.size), dtype=np.float64)
+            for q in range(1, 6):
+                free += _coulff_grid(q, freqlg_chunk, tlog_arr) * xnf_sumqq[:, q - 1][:, np.newaxis]
+
+            ahot_chunk = (
+                free
+                * (3.6919e8 / (f_chunk[np.newaxis, :] ** 3))
+                * (xne[:, np.newaxis] / sqrt_temp[:, np.newaxis])
+            )
+
+            # Bound-free additions from HOTOP transition table (atlas7v.for line 9291-9302)
+            for k in range(HOTOP_TRANSITIONS.shape[0]):
+                freq0, xsect0, alpha0, power0, mult0, _, _ = HOTOP_TRANSITIONS[k]
+                use = f_chunk >= freq0
+                if not np.any(use):
+                    continue
+                ratio = freq0 / f_chunk[use]
+                xsect = xsect0 * (
+                    alpha0 + ratio - alpha0 * ratio
+                ) * np.sqrt(ratio ** int(power0))
+                xx = (
+                    xsect[np.newaxis, :]
+                    * hotop_xnfp[:, hot_id_idx[k]][:, np.newaxis]
+                    * mult0
+                )
+                threshold = ahot_chunk[:, use] / 100.0
+                ahot_chunk[:, use] += np.where(
+                    xx > threshold,
+                    xx * exp_hot[:, k][:, np.newaxis],
+                    0.0,
+                )
+
+            ahot[:, i0:i1] = ahot_chunk * stim_chunk / rho[:, np.newaxis]
     else:
         logger.info("Skipping HOTOP - IFOP(11)=0")
 
@@ -8376,6 +8573,10 @@ def compute_kapp_continuum(
                     "PY_DEBUG_KAPP: "
                     f"wave={wavelength_nm[wl_idx]:.6f} depth={depth_idx + 1} "
                     f"A(misc)={a_base[depth_idx, wl_idx]:.6e} "
+                    f"AH2P={ah2p[depth_idx, wl_idx]:.6e} "
+                    f"AHEMIN={ahemin[depth_idx, wl_idx]:.6e} "
+                    f"ALUKE={aluke[depth_idx, wl_idx]:.6e} "
+                    f"AHOT={ahot[depth_idx, wl_idx]:.6e} "
                     f"AHYD={ahyd[depth_idx, wl_idx]:.6e} "
                     f"AHMIN={ahmin[depth_idx, wl_idx]:.6e} "
                     f"AXCONT={axcont[depth_idx, wl_idx]:.6e} "
