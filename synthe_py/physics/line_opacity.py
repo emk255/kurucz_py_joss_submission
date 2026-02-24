@@ -156,6 +156,137 @@ from synthe_py.physics.voigt_jit import voigt_profile_jit as _voigt_profile_jit
 
 
 @jit(
+    nopython=True,
+    parallel=True,
+    cache=True,
+    fastmath=False,
+)  # fastmath=False for bitwise reproducibility
+def _compute_transp_numba_kernel(
+    transp: np.ndarray,
+    valid_mask: np.ndarray,
+    process_mask: np.ndarray,
+    element_idx: np.ndarray,
+    ion_stage: np.ndarray,
+    line_type: np.ndarray,
+    wavelength: np.ndarray,
+    gf: np.ndarray,
+    cgf: np.ndarray,
+    gamma_rad: np.ndarray,
+    gamma_stark: np.ndarray,
+    gamma_vdw: np.ndarray,
+    center_indices: np.ndarray,
+    center_indices_full: np.ndarray,
+    boltzmann_factor: np.ndarray,
+    population_per_ion: np.ndarray,
+    doppler_per_ion: np.ndarray,
+    mass_density: np.ndarray,
+    electron_density: np.ndarray,
+    txnxn: np.ndarray,
+    continuum_absorption: np.ndarray,
+    continuum_absorption_full: np.ndarray,
+    n_wavelengths: int,
+    cutoff: float,
+    microturb_kms: float,
+    c_light_km: float,
+    h0tab: np.ndarray,
+    h1tab: np.ndarray,
+    h2tab: np.ndarray,
+) -> None:
+    """JIT-compiled TRANSP kernel. Matches Python compute_transp logic exactly."""
+    n_lines = transp.shape[0]
+    n_depths = transp.shape[1]
+    n_elements = population_per_ion.shape[2]
+    max_ion_stage = population_per_ion.shape[1]
+    use_full_kapmin = continuum_absorption_full.shape[0] > 0 and continuum_absorption_full.shape[1] > 0
+    micro = microturb_kms / c_light_km if microturb_kms > 0.0 else 0.0
+
+    for line_idx in prange(n_lines):
+        if not process_mask[line_idx]:
+            continue
+
+        elem_idx = element_idx[line_idx]
+        if elem_idx < 0 or elem_idx >= n_elements:
+            continue
+
+        nelion = ion_stage[line_idx]
+        if nelion <= 0 or nelion > max_ion_stage:
+            continue
+
+        line_wavelength = wavelength[line_idx]
+        gf_linear = gf[line_idx]
+        cgf_val = cgf[line_idx]
+        gamma_rad_val = gamma_rad[line_idx]
+        gamma_stark_val = gamma_stark[line_idx]
+        gamma_vdw_val = gamma_vdw[line_idx]
+        line_type_val = line_type[line_idx]
+        center_idx = center_indices[line_idx]
+        clamped_idx = max(0, min(center_idx, n_wavelengths - 1))
+
+        for depth_idx in range(n_depths):
+            pop_val = population_per_ion[depth_idx, nelion - 1, elem_idx]
+            dop_val = doppler_per_ion[depth_idx, nelion - 1, elem_idx]
+            if micro > 0.0:
+                dop_val = np.sqrt(dop_val * dop_val + micro * micro)
+
+            if pop_val <= 0.0 or dop_val <= 0.0:
+                continue
+
+            rho = mass_density[depth_idx]
+            if rho <= 0.0:
+                continue
+
+            xnfdop = pop_val / (rho * dop_val)
+            doppler_width = dop_val * line_wavelength
+            boltz = boltzmann_factor[depth_idx, line_idx]
+
+            if line_type_val == 1:
+                kappa0_pre_boltz = gamma_vdw_val * gf_linear * (pop_val / rho)
+            else:
+                kappa0_pre_boltz = cgf_val * xnfdop
+
+            if use_full_kapmin:
+                full_idx = center_indices_full[line_idx]
+                full_idx = max(0, min(full_idx, continuum_absorption_full.shape[1] - 1))
+                kapmin = continuum_absorption_full[depth_idx, full_idx] * cutoff
+            else:
+                kapmin = continuum_absorption[depth_idx, clamped_idx] * cutoff
+
+            if kappa0_pre_boltz < kapmin:
+                continue
+
+            post_candidate = kappa0_pre_boltz * boltz
+            if post_candidate < kapmin:
+                continue
+
+            kappa0 = post_candidate
+            if kappa0 <= 0.0:
+                continue
+
+            xne = electron_density[depth_idx]
+            txnxn_val = txnxn[depth_idx]
+            dopple = doppler_width / line_wavelength if line_wavelength > 0 else 1e-6
+
+            if doppler_width > 0 and dopple > 0:
+                gamma_total = gamma_rad_val + gamma_stark_val * xne + gamma_vdw_val * txnxn_val
+                adamp = gamma_total / dopple
+            else:
+                adamp = 0.0
+
+            if adamp >= 0.0 and kappa0 > 0.0:
+                if line_type_val == 1:
+                    kapcen = kappa0
+                else:
+                    if adamp < 0.2:
+                        kapcen = kappa0 * (1.0 - 1.128 * adamp)
+                    else:
+                        voigt_center = _voigt_profile_jit(0.0, adamp, h0tab, h1tab, h2tab)
+                        kapcen = kappa0 * voigt_center
+
+                transp[line_idx, depth_idx] = kapcen
+                valid_mask[line_idx, depth_idx] = True
+
+
+@jit(
     nopython=True, parallel=False, cache=True
 )  # CRITICAL: parallel=False to avoid race conditions
 def _compute_asynth_wings_kernel(
@@ -725,6 +856,9 @@ def compute_transp(
     include_h_lines = os.getenv("PY_INCLUDE_H_LINES") == "1"
     agent_run_id = os.getenv("PY_AGENT_DEBUG_RUN_ID", "")
     probe_depths = (0, max(0, n_depths - 1))
+
+    use_numba = NUMBA_AVAILABLE and os.getenv("PY_USE_NUMBA_TRANSP", "1") != "0"
+    timing_ab = os.getenv("PY_TRANSP_TIMING_AB", "0") == "1"
     transp_probe: Dict[Tuple[float, int], Dict[str, object]] = {}
     center_probe_depths = tuple(sorted({0, max(0, n_depths // 2), max(0, n_depths - 1)}))
     target_center_idx: Dict[float, int] = {}
@@ -762,7 +896,143 @@ def compute_transp(
                     "topFailedPostValue": 0.0,
                 }
 
-    # Process each line
+    def _run_numba_transp() -> None:
+        """Extract arrays and run Numba TRANSP kernel."""
+        from ..engine.opacity import _element_atomic_number
+
+        process_mask = np.zeros(n_lines, dtype=np.bool_)
+        element_idx = np.full(n_lines, -1, dtype=np.int64)
+        wavelength = np.zeros(n_lines, dtype=np.float64)
+        gf = np.zeros(n_lines, dtype=np.float64)
+        cgf = np.zeros(n_lines, dtype=np.float64)
+        ion_stage = np.zeros(n_lines, dtype=np.int64)
+        line_type_arr = np.zeros(n_lines, dtype=np.int64)
+        gamma_rad = np.zeros(n_lines, dtype=np.float64)
+        gamma_stark = np.zeros(n_lines, dtype=np.float64)
+        gamma_vdw = np.zeros(n_lines, dtype=np.float64)
+
+        for line_idx in range(n_lines):
+            record = catalog.records[line_idx]
+            elem_str = str(record.element).strip().upper()
+            is_h = elem_str in {"H", "HI", "H I"}
+            line_type_code = int(getattr(record, "line_type", 0) or 0)
+            n_lower_abs = abs(int(getattr(record, "n_lower", 0) or 0))
+            n_upper_abs = abs(int(getattr(record, "n_upper", 0) or 0))
+            nb_sum = n_lower_abs + n_upper_abs
+            routes_to_fort12 = bool(
+                line_type_code != 2
+                and line_type_code != 1
+                and line_type_code <= 3
+                and nb_sum == 0
+            )
+            if not include_h_lines and (line_type_code == -1 or (is_h and record.ion_stage == 1)):
+                continue
+            if not routes_to_fort12:
+                continue
+            anum = _element_atomic_number(record.element)
+            if anum is None or atmosphere.population_per_ion is None:
+                continue
+            elem_idx = anum - 1
+            if elem_idx >= atmosphere.population_per_ion.shape[2]:
+                continue
+
+            process_mask[line_idx] = True
+            element_idx[line_idx] = elem_idx
+            wavelength[line_idx] = float(
+                index_wavelength[line_idx] if index_wavelength is not None else record.wavelength
+            )
+            gf[line_idx] = float(catalog.gf[line_idx])
+            ion_stage[line_idx] = int(record.ion_stage)
+            line_type_arr[line_idx] = line_type_code
+            gamma_rad[line_idx] = float(catalog.gamma_rad[line_idx])
+            gamma_stark[line_idx] = float(catalog.gamma_stark[line_idx])
+            gamma_vdw[line_idx] = float(catalog.gamma_vdw[line_idx])
+
+            freq_hz = C_LIGHT_NM / wavelength[line_idx]
+            cgf_meta = None
+            if record.metadata:
+                cgf_meta = record.metadata.get("cgf")
+            if cgf_meta is not None and cgf_meta > 0.0:
+                cgf[line_idx] = float(cgf_meta)
+            else:
+                cgf[line_idx] = CGF_CONSTANT * gf[line_idx] / freq_hz
+
+        boltzmann_factor = np.zeros((n_depths, n_lines), dtype=np.float64)
+        for depth_idx in range(n_depths):
+            state = populations.layers[depth_idx]
+            boltzmann_factor[depth_idx, :] = state.boltzmann_factor
+
+        pop_ion = np.asarray(atmosphere.population_per_ion, dtype=np.float64)
+        dop_ion = np.asarray(atmosphere.doppler_per_ion, dtype=np.float64)
+        mass_density = np.asarray(
+            atmosphere.mass_density if atmosphere.mass_density is not None else np.ones(n_depths),
+            dtype=np.float64,
+        )
+        electron_density = np.asarray(
+            atmosphere.electron_density if atmosphere.electron_density is not None else np.zeros(n_depths),
+            dtype=np.float64,
+        )
+        txnxn = np.zeros(n_depths, dtype=np.float64)
+        for depth_idx in range(n_depths):
+            txnxn[depth_idx] = populations.layers[depth_idx].txnxn
+
+        cont_abs = np.asarray(continuum_absorption, dtype=np.float64)
+        if continuum_absorption_full is not None and center_indices_full is not None:
+            cont_abs_full = np.asarray(continuum_absorption_full, dtype=np.float64)
+            center_full = np.asarray(center_indices_full, dtype=np.int64)
+        else:
+            cont_abs_full = np.zeros((0, 0), dtype=np.float64)
+            center_full = np.zeros(n_lines, dtype=np.int64)
+
+        voigt_tbl = tables.voigt_tables()
+        h0tab = voigt_tbl.h0tab
+        h1tab = voigt_tbl.h1tab
+        h2tab = voigt_tbl.h2tab
+
+        _compute_transp_numba_kernel(
+            transp,
+            valid_mask,
+            process_mask,
+            element_idx,
+            ion_stage,
+            line_type_arr,
+            wavelength,
+            gf,
+            cgf,
+            gamma_rad,
+            gamma_stark,
+            gamma_vdw,
+            center_indices,
+            center_full,
+            boltzmann_factor,
+            pop_ion,
+            dop_ion,
+            mass_density,
+            electron_density,
+            txnxn,
+            cont_abs,
+            cont_abs_full,
+            n_wavelengths,
+            cutoff,
+            microturb_kms,
+            C_LIGHT_KM,
+            h0tab,
+            h1tab,
+            h2tab,
+        )
+
+    if use_numba and not timing_ab:
+        t_numba_start = time.perf_counter()
+        _run_numba_transp()
+        t_numba = time.perf_counter() - t_numba_start
+        logger.info("Timing: TRANSP (Numba) in %.3fs", t_numba)
+        logger.info(
+            f"TRANSP computation complete: {np.sum(valid_mask):,} valid line-depth pairs"
+        )
+        return transp, valid_mask, center_indices
+
+    # Process each line (Python path)
+    t_py_start = time.perf_counter()
     for line_idx in range(n_lines):
         if line_idx % log_interval == 0:
             logger.info(
@@ -1568,6 +1838,8 @@ def compute_transp(
                         f"  voigt_center: {voigt_center if adamp >= 0.2 else (1.0 - 1.128 * adamp):.6e}"
                     )
 
+    t_py = time.perf_counter() - t_py_start
+
     # DEBUG: Summary statistics for TRANSP
     if np.any(valid_mask):
         transp_valid = transp[valid_mask]
@@ -1665,6 +1937,37 @@ def compute_transp(
                     },
                 )
                 # endregion
+
+    # A/B timing: run Numba path and compare with Python
+    if timing_ab and NUMBA_AVAILABLE:
+        transp_py = np.asarray(transp, dtype=np.float64, copy=True)
+        valid_mask_py = np.asarray(valid_mask, copy=True)
+        transp.fill(0.0)
+        valid_mask.fill(False)
+        t_numba_start = time.perf_counter()
+        _run_numba_transp()
+        t_numba = time.perf_counter() - t_numba_start
+        match = np.array_equal(valid_mask_py, valid_mask) and np.allclose(
+            transp_py, transp, rtol=0.0, atol=0.0, equal_nan=True
+        )
+        logger.info(
+            "TRANSP timing: Python %.3fs, Numba %.3fs (bitwise match: %s)",
+            t_py,
+            t_numba,
+            match,
+        )
+        if not match:
+            diff_count = np.sum(valid_mask_py != valid_mask)
+            max_diff = np.nanmax(np.abs(transp - transp_py)) if np.any(valid_mask | valid_mask_py) else 0.0
+            logger.warning(
+                "TRANSP A/B MISMATCH: valid_mask diff count=%d, max transp diff=%.3e",
+                diff_count,
+                max_diff,
+            )
+            transp[:] = transp_py
+            valid_mask[:] = valid_mask_py
+        else:
+            logger.info("TRANSP Numba speedup: %.2fx", t_py / t_numba if t_numba > 0 else 0.0)
 
     # Return pre-computed center indices for wing and center accumulation.
     # These are computed using Fortran's logarithmic rounding on the wavelength grid.

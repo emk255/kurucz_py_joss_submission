@@ -435,9 +435,9 @@ _ELEMENT_SYMBOL_BY_Z = {value: key for key, value in _ELEMENT_Z.items()}
 _fort19_unhandled_types: Set[fort19_io.Fort19WingType] = set()
 _AGENT_DEBUG_LOG_PATH = os.getenv(
     "PY_AGENT_DEBUG_LOG_PATH",
-    "/Users/ElliotKim/Desktop/Research/kurucz/.cursor/debug-b6f400.log",
+    "/Users/ElliotKim/Desktop/Research/kurucz/.cursor/debug-9a67b2.log",
 )
-_AGENT_DEBUG_SESSION_ID = "b6f400"
+_AGENT_DEBUG_SESSION_ID = os.getenv("PY_AGENT_DEBUG_SESSION_ID", "9a67b2")
 _AGENT_DEBUG_TARGET_WAVELENGTHS = (
     422.79323578,
     589.15896422,
@@ -464,6 +464,14 @@ _AGENT_DEBUG_TARGET_WAVELENGTHS = (
     636.36093300,
     656.37297600,
     656.59399200,
+    656.20890400,
+    656.55678600,
+    656.59836900,
+    656.62025600,
+    656.65746600,
+    366.87217500,
+    367.25269600,
+    368.03945700,
 )
 _AGENT_DEBUG_WAVE_TOL = 5.0e-2
 _AGENT_DEBUG_BANDS = (
@@ -483,6 +491,9 @@ _AGENT_DEBUG_BANDS = (
     (631.84, 632.21),
     (634.34, 636.56),
     (656.30, 656.66),
+    (366.80, 368.10),
+    (350.00, 400.00),
+    (600.00, 700.00),
 )
 _AGENT_DEBUG_HELIUM_LINE_WAVES = (
     318.86561390,
@@ -2352,6 +2363,7 @@ def _add_fort19_asynth(
     # Build inverse map: fort19 index -> catalog index
     fort19_to_catalog = {v: k for k, v in catalog_to_fort19.items()}
     fort19_indices = np.arange(len(fort19_data.wavelength_vacuum), dtype=np.int32)
+    metal_tables = tables.metal_wing_tables()
 
     # Precompute fort19 center indices on the current wavelength grid
     fort19_centers = _nearest_grid_indices(wavelength, fort19_data.wavelength_vacuum)
@@ -2365,8 +2377,11 @@ def _add_fort19_asynth(
             else:
                 wing_type = fort19_io.Fort19WingType.from_code(int(wing_val))
 
-            # Only handle autoionizing and merged-continuum here (others handled elsewhere).
+            # Handle fort.19 line families that are not present in fort.12:
+            # - NORMAL lines with NBLO/NBUP metadata (e.g. Mg I 457.6574)
+            # - AUTOIONIZING and CONTINUUM records
             if wing_type not in {
+                fort19_io.Fort19WingType.NORMAL,
                 fort19_io.Fort19WingType.AUTOIONIZING,
                 fort19_io.Fort19WingType.CONTINUUM,
             }:
@@ -2396,7 +2411,80 @@ def _add_fort19_asynth(
             if center_index >= wavelength.size:
                 continue
 
-            if wing_type == fort19_io.Fort19WingType.CONTINUUM:
+            if wing_type == fort19_io.Fort19WingType.NORMAL:
+                rho = (
+                    float(atm.mass_density[depth_idx])
+                    if atm.mass_density is not None
+                    else 0.0
+                )
+                if rho <= 0.0:
+                    continue
+                if cat_idx >= pops.layers[depth_idx].doppler_width.size:
+                    continue
+                doppler_width = float(pops.layers[depth_idx].doppler_width[cat_idx])
+                if line_wavelength <= 0.0 or doppler_width <= 0.0:
+                    continue
+                dopple = doppler_width / line_wavelength
+                if dopple <= 0.0:
+                    continue
+                xnfdop = pop_val / (rho * dopple)
+                cgf = float(fort19_data.oscillator_strength[fidx])
+                kappa0_pre = cgf * xnfdop
+
+                clamped_center = max(0, min(center_index, wavelength.size - 1))
+                kapmin = float(continuum[depth_idx, clamped_center]) * cutoff
+                if kappa0_pre < kapmin:
+                    continue
+
+                kappa0 = kappa0_pre * boltz
+                if kappa0 < kapmin:
+                    continue
+
+                depth_state = pops.layers[depth_idx]
+                gamma_total = (
+                    float(fort19_data.gamma_rad[fidx])
+                    + float(fort19_data.gamma_stark[fidx])
+                    * float(depth_state.electron_density)
+                    + float(fort19_data.gamma_vdw[fidx]) * float(depth_state.txnxn)
+                )
+                adamp = gamma_total / dopple if dopple > 0.0 else 0.0
+                if adamp < 0.2:
+                    kapcen = kappa0 * (1.0 - 1.128 * adamp)
+                else:
+                    kapcen = kappa0 * voigt_profile(0.0, adamp)
+                if kapcen >= kapmin:
+                    tmp_buffer[clamped_center] += kapcen
+
+                ncon = int(fort19_data.continuum_index[fidx])
+                nelionx = int(fort19_data.element_index[fidx])
+                nelion_f = int(fort19_data.ion_index[fidx])
+                wcon = None
+                wtail = None
+                if ncon > 0 and nelionx > 0:
+                    wcon, wtail = _compute_continuum_limits(
+                        ncon=ncon,
+                        nelion=nelion_f,
+                        nelionx=nelionx,
+                        emerge_val=float(emerge[depth_idx]),
+                        emerge_h_val=float(emerge_h[depth_idx]),
+                        metal_tables=metal_tables,
+                        ifvac=1,
+                    )
+
+                _accumulate_metal_profile(
+                    buffer=tmp_buffer,
+                    continuum_row=continuum[depth_idx],
+                    wavelength_grid=wavelength,
+                    center_index=center_index,
+                    line_wavelength=line_wavelength,
+                    kappa0=kappa0,
+                    damping=adamp,
+                    doppler_width=doppler_width,
+                    cutoff=cutoff,
+                    wcon=wcon,
+                    wtail=wtail,
+                )
+            elif wing_type == fort19_io.Fort19WingType.CONTINUUM:
                 rho = (
                     float(atm.mass_density[depth_idx])
                     if atm.mass_density is not None
@@ -2875,7 +2963,7 @@ def _compute_hydrogen_line_opacity(
             if (
                 debug_line_val is not None
                 and abs(line_wavelength - debug_line_val) < 1e-3
-                and depth_idx in (19, 39, 59, 79)
+                and depth_idx in (0, 19, 39, 59, 79)
             ):
                 if debug_wave_idx is not None:
                     debug_before = ahline[depth_idx, debug_wave_idx]
@@ -2884,6 +2972,37 @@ def _compute_hydrogen_line_opacity(
                     f"center_idx={center_idx} kappa0_pre={kappa0_pre:.6e} "
                     f"kappa0={kappa0:.6e} kapmin={kapmin:.6e}"
                 )
+                if debug_wave_idx is not None:
+                    dbg_wave = float(wavelength_grid[debug_wave_idx])
+                    dbg_stim = stim[depth_idx, debug_wave_idx]
+                    dbg_delta = dbg_wave - line_wavelength
+                    dbg_profile = hydrogen_line_profile(
+                        max(n_lower, 1),
+                        max(n_upper, n_lower + 1),
+                        pops.layers[depth_idx],
+                        dbg_delta,
+                    )
+                    dbg_value = kappa0 * dbg_profile * dbg_stim
+                    dbg_thresh = continuum[depth_idx, debug_wave_idx] * cutoff
+                    dbg_simple = n_upper <= n_lower + 2
+                    dbg_side = "red" if dbg_wave >= line_wavelength else "blue"
+                    dbg_gate = "open"
+                    if not dbg_simple:
+                        if dbg_side == "red" and dbg_wave > wlminus1:
+                            dbg_gate = "blocked_wlminus1"
+                        elif dbg_side == "blue" and (
+                            dbg_wave < wcon or dbg_wave < wlplus1
+                        ):
+                            dbg_gate = "blocked_wcon_wlplus1"
+                    dbg_pass = (
+                        dbg_gate == "open" and dbg_value > 0.0 and dbg_value >= dbg_thresh
+                    )
+                    print(
+                        f"PY_DEBUG_HLINE_TARGET: line={line_wavelength:.6f} nm depth={depth_idx + 1} "
+                        f"wave={dbg_wave:.6f} side={dbg_side} simple={dbg_simple} gate={dbg_gate} "
+                        f"delta={dbg_delta:.6e} profile={dbg_profile:.6e} value={dbg_value:.6e} "
+                        f"threshold={dbg_thresh:.6e} pass={dbg_pass}"
+                    )
             if (
                 sum_wave_idx is not None
                 and sum_depth_idx is not None

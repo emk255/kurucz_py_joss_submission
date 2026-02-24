@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import os
 from dataclasses import dataclass
 from functools import lru_cache
 from typing import Dict, Tuple
@@ -17,6 +18,8 @@ C_LIGHT = 2.99792458e18
 C_LIGHT_CM = 2.99792458e10
 LYMAN_ALPHA_CENTER_WN = 82259.10
 SQRT_PI = math.sqrt(math.pi)
+_PRINTED_FINE_DEBUG: set[tuple[int, int]] = set()
+_PRINTED_HPROF_DEBUG: set[tuple[int, int]] = set()
 
 
 @dataclass
@@ -1534,6 +1537,19 @@ def _fine_structure(
     ipos = tables.istal[n - 1]
     offsets = tables.stalph[ipos : ipos + ifins] * 1.0e7
     weights = tables.stwtal[ipos : ipos + ifins] / xn2 / 3.0
+    # region agent log
+    fs_debug = os.environ.get("PY_DEBUG_HLINE_FINESTRUCT", "").strip()
+    if fs_debug and (n, m) not in _PRINTED_FINE_DEBUG:
+        target_match = fs_debug in {"1", "true", "all"} or fs_debug == f"{n}-{m}"
+        if target_match:
+            _PRINTED_FINE_DEBUG.add((n, m))
+            print(
+                "PY_DEBUG_HLINE_FINESTRUCT: "
+                f"n={n} m={m} ipos={ipos} ifins={ifins} "
+                f"offsets={np.array2string(offsets, precision=2, separator=',')} "
+                f"weights={np.array2string(weights, precision=6, separator=',')}"
+            )
+    # endregion
     return offsets, weights
 
 
@@ -1563,9 +1579,10 @@ def hydrogen_line_profile(
     dbeta = C_LIGHT / (freqnm * freqnm * xknm)
     c1con = xknm / wavenm * gnm * xm2mn2
     c2con = (xknm / wavenm) ** 2
-    radamp = tables.asum[n] + tables.asum[m]
+    # ASUM/ASUMLYMAN are Fortran 1-based arrays; convert to Python 0-based indexing.
+    radamp = tables.asum[n - 1] + tables.asum[m - 1]
     if n == 1:
-        radamp = tables.asum_lyman[m]
+        radamp = tables.asum_lyman[m - 1]
     radamp /= 12.5664
     radamp /= freqnm
     hf_cache: Dict[Tuple[int, int], float] = {}
@@ -1696,6 +1713,31 @@ def hydrogen_line_profile(
     p1 = (0.9 * y1) ** 2
     fns = (p1 + 0.03 * math.sqrt(max(y1, 0.0))) / (p1 + 1.0)
     stark_core = (prqs * (1.0 + fns) + f) / max(hyd.fo, 1e-30) * dbeta * 1.77245 * dop
+
+    # region agent log
+    hprof_debug = os.environ.get("PY_DEBUG_HPROF", "").strip()
+    if hprof_debug:
+        target_match = hprof_debug in {"1", "true", "all"} or hprof_debug == f"{n}-{m}"
+        if target_match:
+            delta_target = os.environ.get("PY_DEBUG_HPROF_DELTA_NM", "").strip()
+            delta_ok = True
+            if delta_target:
+                try:
+                    delta_ok = abs(delta_lambda_nm - float(delta_target)) <= 5.0e-4
+                except ValueError:
+                    delta_ok = False
+            key = (n, m)
+            if delta_ok and key not in _PRINTED_HPROF_DEBUG:
+                _PRINTED_HPROF_DEBUG.add(key)
+                print(
+                    "PY_DEBUG_HPROF: "
+                    f"n={n} m={m} delta_nm={delta_lambda_nm:.9f} "
+                    f"dopph={dopph:.6e} hwlor={hwlor:.6e} hwstk={hwstk:.6e} "
+                    f"ifcore={ifcore} nwid={nwid} "
+                    f"core={core:.6e} lorentz={lorentz:.6e} stark={stark_core:.6e} "
+                    f"stark_extra={stark_extra:.6e}"
+                )
+    # endregion
 
     # Fortran core branch uses only the dominant width component.
     if ifcore:

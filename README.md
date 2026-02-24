@@ -26,6 +26,7 @@ kurucz/
 ├── samples/                     # Input atmospheres (*.atm)
 ├── synthe/Lines_v5_PL/          # Prebuilt Fortran tfort.* bundle
 ├── synthe_py/                   # Python pipeline
+├── requirements.txt             # Python dependencies
 ├── compile_fortran.sh
 ├── run_fortran_atm.sh
 ├── run_validation_100.sh
@@ -37,14 +38,27 @@ kurucz/
     └── logs/
 ```
 
-## 1) Build Fortran
+## 1) Python Setup
+
+Create a virtual environment and install dependencies:
 
 ```bash
-cd /Users/ElliotKim/Desktop/Research/kurucz
+cd /path/to/kurucz
+python3 -m venv .venv
+source .venv/bin/activate   # On Windows: .venv\Scripts\activate
+pip install -r requirements.txt
+```
+
+Key dependencies: `numpy`, `scipy`, `numba`, `matplotlib`.
+
+## 2) Build Fortran
+
+```bash
+cd /path/to/kurucz
 ./compile_fortran.sh
 ```
 
-## 2) Run Validation
+## 3) Run Validation
 
 Run all samples (both Fortran and Python):
 
@@ -79,7 +93,7 @@ Resume behavior is automatic:
 - skips Fortran if output spec already exists
 - skips Python if output spec already exists
 
-## 3) Python-Only Pipeline
+## 4) Python-Only Pipeline
 
 One-command wrapper (only parameters: `.atm`, `wl_start`, `wl_end`):
 
@@ -133,7 +147,7 @@ To disable caches explicitly:
 PY_DISABLE_PARSED_CACHE=1 PY_DISABLE_COMPILED_CACHE=1 python3 -m synthe_py.cli ...
 ```
 
-## 4) Plot Spectra
+## 5) Plot Spectra
 
 Default (uses built-in defaults in `plot.py`):
 
@@ -157,7 +171,7 @@ python3 plot.py \
   --wl-start 300 --wl-end 1800
 ```
 
-## 5) Compare Spectra (Text Metrics)
+## 6) Compare Spectra (Text Metrics)
 
 Use `synthe_py/tools/compare_spectra.py` to compute numeric agreement metrics.
 
