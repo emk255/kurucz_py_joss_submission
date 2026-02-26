@@ -20,6 +20,16 @@ LYMAN_ALPHA_CENTER_WN = 82259.10
 SQRT_PI = math.sqrt(math.pi)
 _PRINTED_FINE_DEBUG: set[tuple[int, int]] = set()
 _PRINTED_HPROF_DEBUG: set[tuple[int, int]] = set()
+_STEP3_HYDROGEN_CLEANUP = os.getenv("PY_OPT_STEP3_HYDROGEN_CLEANUP", "0") != "0"
+_FINESTRUCT_DEBUG_TARGET = os.environ.get("PY_DEBUG_HLINE_FINESTRUCT", "").strip()
+_HPROF_DEBUG_TARGET = os.environ.get("PY_DEBUG_HPROF", "").strip()
+_HPROF_DELTA_TARGET_RAW = os.environ.get("PY_DEBUG_HPROF_DELTA_NM", "").strip()
+_HPROF_DELTA_TARGET_VAL: float | None = None
+if _HPROF_DELTA_TARGET_RAW:
+    try:
+        _HPROF_DELTA_TARGET_VAL = float(_HPROF_DELTA_TARGET_RAW)
+    except ValueError:
+        _HPROF_DELTA_TARGET_VAL = None
 
 
 @dataclass
@@ -1498,12 +1508,9 @@ def sofbeta(beta: float, p: float, n: int, m: int) -> float:
     return (1.5 / sb + 27.0 / b2) / b2 * corr
 
 
-def _hf_nm(n: int, m: int, cache: Dict[Tuple[int, int], float]) -> float:
-    key = (n, m)
-    if key in cache:
-        return cache[key]
+@lru_cache(maxsize=256)
+def _hf_nm_cached(n: int, m: int) -> float:
     if m <= n:
-        cache[key] = 0.0
         return 0.0
     xn = float(n)
     ginf = 0.2027 / xn**0.71
@@ -1516,7 +1523,6 @@ def _hf_nm(n: int, m: int, cache: Dict[Tuple[int, int], float]) -> float:
     xmn12 = xmn**1.2
     wt = (xmn12 - 1.0) / (xmn12 + wtc)
     fnm = fk * (1.0 - wt * ginf - (0.222 + gca / xm) * (1.0 - wt))
-    cache[key] = fnm
     return fnm
 
 
@@ -1538,7 +1544,9 @@ def _fine_structure(
     offsets = tables.stalph[ipos : ipos + ifins] * 1.0e7
     weights = tables.stwtal[ipos : ipos + ifins] / xn2 / 3.0
     # region agent log
-    fs_debug = os.environ.get("PY_DEBUG_HLINE_FINESTRUCT", "").strip()
+    fs_debug = _FINESTRUCT_DEBUG_TARGET
+    if not _STEP3_HYDROGEN_CLEANUP:
+        fs_debug = os.environ.get("PY_DEBUG_HLINE_FINESTRUCT", "").strip()
     if fs_debug and (n, m) not in _PRINTED_FINE_DEBUG:
         target_match = fs_debug in {"1", "true", "all"} or fs_debug == f"{n}-{m}"
         if target_match:
@@ -1551,6 +1559,11 @@ def _fine_structure(
             )
     # endregion
     return offsets, weights
+
+
+@lru_cache(maxsize=64)
+def _fine_structure_cached(n: int, m: int) -> Tuple[np.ndarray, np.ndarray]:
+    return _fine_structure(n, m, hydrogen_tables())
 
 
 def hydrogen_line_profile(
@@ -1585,10 +1598,9 @@ def hydrogen_line_profile(
         radamp = tables.asum_lyman[m - 1]
     radamp /= 12.5664
     radamp /= freqnm
-    hf_cache: Dict[Tuple[int, int], float] = {}
-    resont = _hf_nm(1, m, hf_cache) / xm / (1.0 - 1.0 / xm2)
+    resont = _hf_nm_cached(1, m) / xm / (1.0 - 1.0 / xm2)
     if n != 1:
-        resont += _hf_nm(1, n, hf_cache) / xn / (1.0 - 1.0 / xn2)
+        resont += _hf_nm_cached(1, n) / xn / (1.0 - 1.0 / xn2)
     resont *= 3.579e-24 / gnm
     vdw = 4.45e-26 / gnm * (xm2 * (7.0 * xm2 + 5.0)) ** 0.4
     hwvdw = vdw * hyd.t3nhe + 2.0 * vdw * hyd.t3nh2
@@ -1597,7 +1609,7 @@ def hydrogen_line_profile(
     hwres = resont * hyd.xnfph[0] * 2.0 if hyd.xnfph.size > 0 else 0.0
     hwstk = stark * hyd.fo
     hwlor = hwres + hwvdw + hwrad
-    finest, finswt = _fine_structure(n, m, tables)
+    finest, finswt = _fine_structure_cached(n, m)
     wl0 = wavenm
     wl = wl0 + delta_lambda_nm * 10.0
     freq = C_LIGHT / wl
@@ -1715,17 +1727,26 @@ def hydrogen_line_profile(
     stark_core = (prqs * (1.0 + fns) + f) / max(hyd.fo, 1e-30) * dbeta * 1.77245 * dop
 
     # region agent log
-    hprof_debug = os.environ.get("PY_DEBUG_HPROF", "").strip()
+    hprof_debug = _HPROF_DEBUG_TARGET
+    if not _STEP3_HYDROGEN_CLEANUP:
+        hprof_debug = os.environ.get("PY_DEBUG_HPROF", "").strip()
     if hprof_debug:
         target_match = hprof_debug in {"1", "true", "all"} or hprof_debug == f"{n}-{m}"
         if target_match:
-            delta_target = os.environ.get("PY_DEBUG_HPROF_DELTA_NM", "").strip()
             delta_ok = True
-            if delta_target:
-                try:
-                    delta_ok = abs(delta_lambda_nm - float(delta_target)) <= 5.0e-4
-                except ValueError:
-                    delta_ok = False
+            if _STEP3_HYDROGEN_CLEANUP:
+                if _HPROF_DELTA_TARGET_RAW:
+                    if _HPROF_DELTA_TARGET_VAL is not None:
+                        delta_ok = abs(delta_lambda_nm - _HPROF_DELTA_TARGET_VAL) <= 5.0e-4
+                    else:
+                        delta_ok = False
+            else:
+                delta_target = os.environ.get("PY_DEBUG_HPROF_DELTA_NM", "").strip()
+                if delta_target:
+                    try:
+                        delta_ok = abs(delta_lambda_nm - float(delta_target)) <= 5.0e-4
+                    except ValueError:
+                        delta_ok = False
             key = (n, m)
             if delta_ok and key not in _PRINTED_HPROF_DEBUG:
                 _PRINTED_HPROF_DEBUG.add(key)

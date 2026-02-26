@@ -4,7 +4,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from functools import lru_cache
+import json
+import os
 from pathlib import Path
+import time
 from typing import Dict, Optional, Tuple
 
 import numpy as np
@@ -13,25 +16,52 @@ from .helium_tables import HeTables, HeLineTables, load_tables as load_bcs_table
 from .profiles.voigt import voigt_profile
 from . import tables
 
-try:
-    from numba import jit
-
-    NUMBA_AVAILABLE = True
-except Exception:  # pragma: no cover - numba is optional
-    NUMBA_AVAILABLE = False
-
-    def jit(*args, **kwargs):  # type: ignore[override]
-        def _decorator(fn):
-            return fn
-
-        return _decorator
-
+from numba import jit
 
 SQRT_PI = np.sqrt(np.pi)
 HE_DATA_PATH = Path(__file__).resolve().parents[1] / "data"
 # Fortran synthe.for GRIEM/DIMITRI lookup uses +/- 0.1 nm window:
 # IF(WL.GT.WAVE(ILINE)-.1.AND.WL.LT.WAVE(ILINE)+.1)
 HE_TABLE_MATCH_TOL_NM = 0.1
+
+# region agent log H201
+_AGENT_DEBUG_LOG_PATH = os.getenv("PY_AGENT_DEBUG_LOG_PATH", "")
+_AGENT_DEBUG_RUN_ID = os.getenv("PY_AGENT_DEBUG_RUN_ID", "")
+_AGENT_DEBUG_SESSION_ID = os.getenv("PY_AGENT_DEBUG_SESSION_ID", "")
+
+
+def _agent_write_log(
+    run_id: str,
+    hypothesis_id: str,
+    location: str,
+    message: str,
+    data: dict,
+    log_path: str = "",
+    session_id: str = "",
+) -> None:
+    target_path = log_path or _AGENT_DEBUG_LOG_PATH
+    target_session = session_id or _AGENT_DEBUG_SESSION_ID
+    if not target_path or not run_id:
+        return
+    payload = {
+        "runId": run_id,
+        "hypothesisId": hypothesis_id,
+        "location": location,
+        "message": message,
+        "data": data,
+        "timestamp": int(time.time() * 1000),
+    }
+    if target_session:
+        payload["sessionId"] = target_session
+    try:
+        with open(target_path, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(payload, ensure_ascii=True, separators=(",", ":")))
+            fh.write("\n")
+    except Exception:
+        pass
+
+
+# endregion
 
 
 # Shared Voigt profile — single canonical JIT-compiled implementation
@@ -595,6 +625,46 @@ class HeliumWingSolver:
         self._voigt_h0tab = None
         self._voigt_h1tab = None
         self._voigt_h2tab = None
+        # region agent log H201
+        self._agent_debug_run_id = _AGENT_DEBUG_RUN_ID
+        self._agent_debug_log_path = _AGENT_DEBUG_LOG_PATH
+        self._agent_debug_session_id = _AGENT_DEBUG_SESSION_ID
+        self._agent_debug_enabled = bool(
+            self._agent_debug_log_path and self._agent_debug_run_id
+        )
+        self._agent_numba_calls = 0
+        self._agent_numba_sampled_calls = 0
+        self._agent_numba_prepare_ms = 0.0
+        self._agent_numba_kernel_ms = 0.0
+        self._agent_numba_next_emit = 20000
+        self._agent_missing_xnfph_calls = 0
+        self._agent_missing_xnfhe2_calls = 0
+        self._agent_route_bcs_4471 = 0
+        self._agent_route_bcs_4026 = 0
+        self._agent_route_bcs_4387 = 0
+        self._agent_route_bcs_4921 = 0
+        self._agent_route_lookup = 0
+        self._agent_route_griem_only = 0
+        self._agent_route_other = 0
+        self._agent_logged_eval_numba_entry = False
+        self._agent_logged_eval_entry = False
+        if self._agent_debug_enabled:
+            _agent_write_log(
+                run_id=self._agent_debug_run_id,
+                hypothesis_id="H200",
+                location="synthe_py/physics/helium_profiles.py:HeliumWingSolver.__init__",
+                message="Helium solver debug/session state",
+                data={
+                    "numbaAvailable": True,
+                    "hasXnfph": bool(self.xnfph is not None),
+                    "hasXnfHe2": bool(self.xnf_he2 is not None),
+                    "temperatureSize": int(self.temperature.size),
+                    "debugEnabled": bool(self._agent_debug_enabled),
+                },
+                log_path=self._agent_debug_log_path,
+                session_id=self._agent_debug_session_id,
+            )
+        # endregion
 
     @staticmethod
     def _clamp_temp(temp: float, tmin: float, tmax: float) -> float:
@@ -611,7 +681,7 @@ class HeliumWingSolver:
         return float(self.xnf_he2[depth_idx])
 
     def _prepare_numba_cache(self) -> None:
-        if not NUMBA_AVAILABLE or self._numba_prepared:
+        if self._numba_prepared:
             return
         n_depths = self.temperature.shape[0]
         max_len = max(
@@ -700,18 +770,60 @@ class HeliumWingSolver:
         gamma_rad: float,
         gamma_stark: float,
     ) -> float:
-        if not NUMBA_AVAILABLE:
-            return self.evaluate(
-                line_type,
-                depth_idx,
-                delta_nm,
-                line_wavelength,
-                doppler_width,
-                gamma_rad,
-                gamma_stark,
-            )
+        # region agent log H201
+        call_idx = 0
+        sample_timing = False
+        t0 = 0.0
+        t1 = 0.0
+        if self._agent_debug_enabled:
+            self._agent_numba_calls += 1
+            call_idx = self._agent_numba_calls
+            if not self._agent_logged_eval_numba_entry:
+                self._agent_logged_eval_numba_entry = True
+                _agent_write_log(
+                    run_id=self._agent_debug_run_id,
+                    hypothesis_id="H201",
+                    location="synthe_py/physics/helium_profiles.py:HeliumWingSolver.evaluate_numba",
+                    message="Entered evaluate_numba path",
+                    data={
+                        "lineType": int(line_type),
+                        "lineWavelengthNm": float(line_wavelength),
+                        "depthIndex": int(depth_idx),
+                    },
+                    log_path=self._agent_debug_log_path,
+                    session_id=self._agent_debug_session_id,
+                )
+            if self.xnfph is None:
+                self._agent_missing_xnfph_calls += 1
+            if self.xnf_he2 is None:
+                self._agent_missing_xnfhe2_calls += 1
+            if line_type in (-3, -4):
+                if abs(line_wavelength - 447.15) < 0.4:
+                    self._agent_route_bcs_4471 += 1
+                elif abs(line_wavelength - 402.62) < 0.4:
+                    self._agent_route_bcs_4026 += 1
+                elif abs(line_wavelength - 438.79) < 0.4:
+                    self._agent_route_bcs_4387 += 1
+                elif abs(line_wavelength - 492.19) < 0.4:
+                    self._agent_route_bcs_4921 += 1
+                else:
+                    self._agent_route_lookup += 1
+            elif line_type == -6:
+                self._agent_route_griem_only += 1
+            else:
+                self._agent_route_other += 1
+            sample_timing = (call_idx & 255) == 0
+            if sample_timing:
+                self._agent_numba_sampled_calls += 1
+                t0 = time.perf_counter()
+        # endregion
         self._prepare_numba_cache()
-        return _evaluate_helium_profile_jit(
+        # region agent log H201
+        if sample_timing:
+            t1 = time.perf_counter()
+            self._agent_numba_prepare_ms += (t1 - t0) * 1000.0
+        # endregion
+        result = _evaluate_helium_profile_jit(
             line_type=line_type,
             depth_idx=depth_idx,
             delta_nm=delta_nm,
@@ -755,6 +867,61 @@ class HeliumWingSolver:
             h1tab=self._voigt_h1tab,
             h2tab=self._voigt_h2tab,
         )
+        # region agent log H201
+        if sample_timing:
+            self._agent_numba_kernel_ms += (time.perf_counter() - t1) * 1000.0
+        if self._agent_debug_enabled and call_idx >= self._agent_numba_next_emit:
+            sampled = max(1, self._agent_numba_sampled_calls)
+            avg_prepare_us = (self._agent_numba_prepare_ms * 1000.0) / sampled
+            avg_kernel_us = (self._agent_numba_kernel_ms * 1000.0) / sampled
+            denom = avg_prepare_us + avg_kernel_us
+            prepare_share_pct = (avg_prepare_us / denom * 100.0) if denom > 0.0 else 0.0
+            total_routes = max(1, self._agent_numba_calls)
+            lookup_share_pct = (
+                self._agent_route_lookup / total_routes * 100.0
+                if total_routes > 0
+                else 0.0
+            )
+            _agent_write_log(
+                run_id=self._agent_debug_run_id,
+                hypothesis_id="H201",
+                location="synthe_py/physics/helium_profiles.py:HeliumWingSolver.evaluate_numba",
+                message="evaluate_numba sampled wrapper vs kernel timing",
+                data={
+                    "callCount": int(self._agent_numba_calls),
+                    "sampledCalls": int(self._agent_numba_sampled_calls),
+                    "avgPrepareUs": float(avg_prepare_us),
+                    "avgKernelUs": float(avg_kernel_us),
+                    "prepareSharePct": float(prepare_share_pct),
+                    "numbaAvailable": True,
+                },
+                log_path=self._agent_debug_log_path,
+                session_id=self._agent_debug_session_id,
+            )
+            _agent_write_log(
+                run_id=self._agent_debug_run_id,
+                hypothesis_id="H202",
+                location="synthe_py/physics/helium_profiles.py:HeliumWingSolver.evaluate_numba",
+                message="evaluate_numba route distribution and data availability",
+                data={
+                    "callCount": int(self._agent_numba_calls),
+                    "routeBcs4471": int(self._agent_route_bcs_4471),
+                    "routeBcs4026": int(self._agent_route_bcs_4026),
+                    "routeBcs4387": int(self._agent_route_bcs_4387),
+                    "routeBcs4921": int(self._agent_route_bcs_4921),
+                    "routeLookup": int(self._agent_route_lookup),
+                    "routeGriemOnly": int(self._agent_route_griem_only),
+                    "routeOther": int(self._agent_route_other),
+                    "lookupSharePct": float(lookup_share_pct),
+                    "missingXnfphCalls": int(self._agent_missing_xnfph_calls),
+                    "missingXnfHe2Calls": int(self._agent_missing_xnfhe2_calls),
+                },
+                log_path=self._agent_debug_log_path,
+                session_id=self._agent_debug_session_id,
+            )
+            self._agent_numba_next_emit *= 5
+        # endregion
+        return result
 
     def _ensure_bcs(
         self, depth_idx: int, line_id: int
@@ -1098,6 +1265,23 @@ class HeliumWingSolver:
         gamma_rad: float,
         gamma_stark: float,
     ) -> float:
+        # region agent log H203
+        if self._agent_debug_enabled and not self._agent_logged_eval_entry:
+            self._agent_logged_eval_entry = True
+            _agent_write_log(
+                run_id=self._agent_debug_run_id,
+                hypothesis_id="H203",
+                location="synthe_py/physics/helium_profiles.py:HeliumWingSolver.evaluate",
+                message="Entered Python evaluate path",
+                data={
+                    "lineType": int(line_type),
+                    "lineWavelengthNm": float(line_wavelength),
+                    "depthIndex": int(depth_idx),
+                },
+                log_path=self._agent_debug_log_path,
+                session_id=self._agent_debug_session_id,
+            )
+        # endregion
         doppler = max(doppler_width, 1e-40)
         wave = line_wavelength + delta_nm
         if line_type in (-3, -4):

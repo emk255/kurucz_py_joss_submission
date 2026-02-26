@@ -32,8 +32,6 @@ class LineDataConfig:
     include_predicted: bool = False
     cache_directory: Optional[Path] = None
     allow_tfort_runtime: bool = False
-    fort20: Optional[Path] = None  # Deprecated - not used
-    fort29: Optional[Path] = None  # Deprecated - wavelength grid built from config
 
 
 @dataclass
@@ -94,8 +92,6 @@ class SynthesisConfig:
         nlte: bool = False,
         scattering_iterations: int = 8,
         scattering_tolerance: float = 1e-3,
-        fort20: Optional[Path] = None,
-        fort29: Optional[Path] = None,
         rhoxj_scale: float = 0.0,
         enable_helium_wings: bool = True,
         skip_hydrogen_wings: bool = False,
@@ -119,8 +115,6 @@ class SynthesisConfig:
             line_data=LineDataConfig(
                 atomic_catalog=atomic_catalog,
                 allow_tfort_runtime=allow_tfort_runtime,
-                fort20=fort20,
-                fort29=fort29,
             ),
             atmosphere=AtmosphereInput(model_path=atmosphere_path, npz_path=npz_path),
             output=OutputConfig(spec_path=spec_path, diagnostics_path=diagnostics_path),

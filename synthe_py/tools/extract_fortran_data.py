@@ -14,6 +14,29 @@ from pathlib import Path
 import numpy as np
 
 
+def _parse_fortran_real_values(values_content: str) -> list[float]:
+    """Parse Fortran DATA numeric payload, skipping continuation labels."""
+    values: list[float] = []
+    for raw_line in values_content.splitlines():
+        # Drop trailing comments and leading continuation counters (e.g. "     2 ").
+        line = raw_line.split("!")[0]
+        line = re.sub(r"^\s*\d+\s+", "", line)
+        if not line.strip():
+            continue
+        for token in line.replace(",", " ").split():
+            cleaned = token.strip().rstrip("/")
+            if not cleaned:
+                continue
+            # Avoid parsing continuation counters as data values.
+            if "." not in cleaned and "D" not in cleaned.upper() and "E" not in cleaned.upper():
+                continue
+            try:
+                values.append(float(cleaned.replace("D", "E").replace("d", "e")))
+            except ValueError:
+                continue
+    return values
+
+
 def extract_potion_data(atlas7v_path: Path, rgfall_path: Path = None) -> np.ndarray:
     """Extract POTION array from atlas7v.for and rgfall.for exactly matching Fortran."""
     potion = np.zeros(999, dtype=np.float64)
@@ -196,19 +219,7 @@ def extract_potion_data(atlas7v_path: Path, rgfall_path: Path = None) -> np.ndar
                 if match_full:
                     values_content = match_full.group(1)
                     
-                    # Parse values - handle D notation (e.g., 109678.772D0, 0.)
-                    values = []
-                    # Pattern: number optionally followed by D and exponent
-                    for val_match in re.finditer(r"([\d.]+)D?([+-]?\d*)", values_content):
-                        num_str = val_match.group(1)
-                        exp_str = val_match.group(2)
-                        
-                        num = float(num_str)
-                        if exp_str:
-                            exp = int(exp_str)
-                            num *= 10.0 ** exp
-                        
-                        values.append(num)
+                    values = _parse_fortran_real_values(values_content)
                     
                     # Store in POTION array
                     for idx, val in enumerate(values):
@@ -295,18 +306,7 @@ def extract_potion_data(atlas7v_path: Path, rgfall_path: Path = None) -> np.ndar
                     if match_full:
                         values_content = match_full.group(1)
                         
-                        # Parse values - handle D notation
-                        values = []
-                        for val_match in re.finditer(r"([\d.]+)D?([+-]?\d*)", values_content):
-                            num_str = val_match.group(1)
-                            exp_str = val_match.group(2)
-                            
-                            num = float(num_str)
-                            if exp_str:
-                                exp = int(exp_str)
-                                num *= 10.0 ** exp
-                            
-                            values.append(num)
+                        values = _parse_fortran_real_values(values_content)
                         
                         # Store in POTION array (overwrite if already set from atlas7v.for)
                         for idx, val in enumerate(values):
@@ -337,14 +337,7 @@ def extract_potion_data(atlas7v_path: Path, rgfall_path: Path = None) -> np.ndar
                     match_full = re.search(r"DATA\s+POTHe\s*/\s*(.+?)\s*/", line, re.DOTALL | re.IGNORECASE)
                     if match_full:
                         values_content = match_full.group(1)
-                        values = []
-                        for val_match in re.finditer(r"([\d.]+)D?([+-]?\d*)", values_content):
-                            num_str = val_match.group(1)
-                            exp_str = val_match.group(2)
-                            num = float(num_str)
-                            if exp_str:
-                                num *= 10.0 ** int(exp_str)
-                            values.append(num)
+                        values = _parse_fortran_real_values(values_content)
                         if len(values) >= 2:
                             potion[2] = values[0]  # He I -> He II
                             potion[3] = values[1]  # He II -> He III

@@ -5,20 +5,7 @@ import os
 import time
 import numpy as np
 
-try:
-    from numba import jit
-
-    NUMBA_AVAILABLE = True
-except ImportError:
-    NUMBA_AVAILABLE = False
-
-    # Dummy decorator if Numba not available
-    def jit(*args, **kwargs):
-        def decorator(func):
-            return func
-
-        return decorator
-
+from numba import jit
 
 from .josh_tables import (
     CH_WEIGHTS,
@@ -42,7 +29,7 @@ _AGENT_DEBUG_LOG_PATH = os.getenv(
     "PY_AGENT_DEBUG_LOG_PATH",
     "results/validation_100/josh_agent_debug.ndjson",
 )
-_AGENT_DEBUG_SESSION_ID = "b6f400"
+_AGENT_DEBUG_SESSION_ID = os.getenv("PY_AGENT_DEBUG_SESSION_ID", "b6f400")
 _AGENT_DEBUG_TARGET_WAVELENGTHS = (
     422.793236,
     589.158964,
@@ -68,6 +55,12 @@ _AGENT_DEBUG_TARGET_WAVELENGTHS = (
     636.360933,
     656.372976,
     656.593992,
+    366.572686,
+    366.714455,
+    366.872175,
+    367.050763,
+    367.252696,
+    368.039457,
 )
 _AGENT_DEBUG_WAVELENGTH_TOL = 5.0e-2
 
@@ -503,6 +496,8 @@ def solve_josh_flux(
     # Keep deep RT diagnostics opt-in; default pipeline runs should stay quiet/fast.
     if debug and os.getenv("PY_ENABLE_JOSH_DEBUG", "0") != "1":
         debug = False
+    if debug and os.getenv("PY_ENABLE_JOSH_DEBUG", "0") != "1":
+        debug = False
 
     # CRITICAL DEBUG: Print at function entry to verify it's being called
     if debug:
@@ -780,6 +775,14 @@ def solve_josh_flux(
     agent_log_enabled, agent_wave_nm = _agent_should_log(debug_label)
     agent_run_id = os.getenv("PY_AGENT_DEBUG_RUN_ID", "pre-fix")
     if agent_log_enabled:
+        old_sample_idx = np.array([0, 1, 2, 39, 49, 59, 79], dtype=np.int64)
+        old_valid_idx = old_sample_idx[old_sample_idx < abtot.size]
+        acont_sample = [float(acont[idx]) for idx in old_valid_idx]
+        aline_sample = [float(aline[idx]) for idx in old_valid_idx]
+        sigmac_sample = [float(sigmac[idx]) for idx in old_valid_idx]
+        sigmal_sample = [float(sigmal[idx]) for idx in old_valid_idx]
+        abtot_sample = [float(abtot[idx]) for idx in old_valid_idx]
+        rho_sample = [float(rho[idx]) for idx in old_valid_idx]
         # region agent log
         _agent_write_log(
             run_id=agent_run_id,
@@ -797,6 +800,13 @@ def solve_josh_flux(
                 "sline0": float(sline[0]) if sline.size else 0.0,
                 "snubar0": float(snubar[0]) if snubar.size else 0.0,
                 "alpha0": float(alpha[0]) if alpha.size else 0.0,
+                "oldGridSampleIndices": [int(idx) for idx in old_valid_idx],
+                "acontSample": acont_sample,
+                "alineSample": aline_sample,
+                "sigmacSample": sigmac_sample,
+                "sigmalSample": sigmal_sample,
+                "abtotSample": abtot_sample,
+                "rhoSample": rho_sample,
             },
         )
         # endregion
@@ -1229,6 +1239,11 @@ def solve_josh_flux(
     needs_iteration = np.any(alpha > 1e-12)
 
     if agent_log_enabled and taunu.size > 0:
+        old_sample_idx = np.array([0, 1, 2, 39, 49, 59, 79], dtype=np.int64)
+        old_valid_idx = old_sample_idx[old_sample_idx < taunu.size]
+        taunu_sample = [float(taunu[idx]) for idx in old_valid_idx]
+        snubar_sample = [float(snubar[idx]) for idx in old_valid_idx]
+        alpha_sample = [float(alpha[idx]) for idx in old_valid_idx]
         # region agent log
         _agent_write_log(
             run_id=agent_run_id,
@@ -1243,6 +1258,10 @@ def solve_josh_flux(
                 "xtauMax": float(XTAU_GRID[-1]),
                 "needsIteration": bool(needs_iteration),
                 "surfaceGtTauGridMax": bool(taunu[0] > XTAU_GRID[-1]),
+                "oldGridSampleIndices": [int(idx) for idx in old_valid_idx],
+                "taunuSample": taunu_sample,
+                "snubarSample": snubar_sample,
+                "alphaSample": alpha_sample,
             },
         )
         # endregion
@@ -1389,6 +1408,30 @@ def solve_josh_flux(
                 debug=debug,
             )
             xalpha, maxj_xalpha = _map1(taunu, alpha, XTAU_GRID, debug=debug)
+            if agent_log_enabled:
+                map_sample_idx = np.array([0, 1, 2, 9, 19, 39, 49, 50], dtype=np.int64)
+                map_valid_idx = map_sample_idx[map_sample_idx < xsbar.size]
+                xsbar_raw_sample = [float(xsbar[idx]) for idx in map_valid_idx]
+                xalpha_raw_sample = [float(xalpha[idx]) for idx in map_valid_idx]
+                # region agent log
+                _agent_write_log(
+                    run_id=agent_run_id,
+                    hypothesis_id="H6",
+                    location="synthe_py/physics/josh_solver.py:post_map1_pre_mask",
+                    message="MAP1 outputs before surface masking",
+                    data={
+                        "debugLabel": debug_label,
+                        "waveNm": float(agent_wave_nm),
+                        "maxjFromMapSnubar": int(maxj_xsbar),
+                        "maxjFromMapAlpha": int(maxj_xalpha),
+                        "mapSampleIndices": [int(idx) for idx in map_valid_idx],
+                        "xsbarRawSample": xsbar_raw_sample,
+                        "xalphaRawSample": xalpha_raw_sample,
+                        "taunu0": float(taunu[0]) if taunu.size else 0.0,
+                        "taunuLast": float(taunu[-1]) if taunu.size else 0.0,
+                    },
+                )
+                # endregion
             # CRITICAL DEBUG: Check XSBAR after MAP1, BEFORE mask
             if debug:
                 print(f"\nDEBUG: After MAP1, BEFORE mask:")
@@ -1465,6 +1508,11 @@ def solve_josh_flux(
 
         if agent_log_enabled:
             mask_count = int(np.sum(XTAU_GRID < taunu[0])) if taunu.size > 0 else 0
+            sample_idx = np.array([0, 1, 2, 9, 19, 39, 49, 50], dtype=np.int64)
+            valid_idx = sample_idx[sample_idx < xs.size]
+            xs_init_sample = [float(xs[idx]) for idx in valid_idx]
+            xalpha_sample = [float(xalpha[idx]) for idx in valid_idx]
+            xsbar_mod_sample = [float(xsbar_modified[idx]) for idx in valid_idx]
             # region agent log
             _agent_write_log(
                 run_id=agent_run_id,
@@ -1483,6 +1531,10 @@ def solve_josh_flux(
                     "xsbarModified0": float(xsbar_modified[0])
                     if xsbar_modified.size
                     else 0.0,
+                    "sampleIndices": [int(idx) for idx in valid_idx],
+                    "xsInitSample": xs_init_sample,
+                    "xalphaSample": xalpha_sample,
+                    "xsbarModifiedSample": xsbar_mod_sample,
                 },
             )
             # endregion
@@ -1631,13 +1683,6 @@ def solve_josh_flux(
                     delxs1 = (sum1 * xalpha[1] + xsbar_modified[1] - xs[1]) / diag[1]
                     print(f"  ITER DEBUG K=1: sum={sum1:.8E} delxs={delxs1:.8E}")
 
-            # Use Numba kernel for iteration (required for performance)
-            if not NUMBA_AVAILABLE:
-                raise RuntimeError(
-                    "Numba is required for JOSH solver iteration. "
-                    "Please install numba: pip install numba"
-                )
-
             # Make a copy for Numba (needs writable array)
             xs_copy = xs.copy()
             if USE_FLOAT32_ITERATION:
@@ -1732,6 +1777,9 @@ def solve_josh_flux(
         num_iterations = 0  # No iteration for this path
 
     if agent_log_enabled:
+        sample_idx = np.array([0, 1, 2, 9, 19, 39, 49, 50], dtype=np.int64)
+        valid_idx = sample_idx[sample_idx < xs.size]
+        xs_final_sample = [float(xs[idx]) for idx in valid_idx]
         # region agent log
         _agent_write_log(
             run_id=agent_run_id,
@@ -1748,6 +1796,8 @@ def solve_josh_flux(
                 "numIterations": int(num_iterations),
                 "xs0Final": float(xs[0]) if xs.size else 0.0,
                 "xsLastFinal": float(xs[-1]) if xs.size else 0.0,
+                "sampleIndices": [int(idx) for idx in valid_idx],
+                "xsFinalSample": xs_final_sample,
                 "taunu0Final": float(taunu[0]) if taunu.size else 0.0,
                 "taunu1Final": float(taunu[1]) if taunu.size > 1 else 0.0,
                 "taunu2Final": float(taunu[2]) if taunu.size > 2 else 0.0,

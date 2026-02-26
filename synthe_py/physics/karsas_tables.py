@@ -4,19 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 
-try:
-    from numba import jit
-
-    NUMBA_AVAILABLE = True
-except ImportError:
-    NUMBA_AVAILABLE = False
-
-    def jit(*args, **kwargs):
-        def decorator(func):
-            return func
-
-        return decorator
-
+from numba import jit
 
 FREQ_LOG = np.array(
     [
@@ -1928,14 +1916,7 @@ def _xkarsas_python(freq: float, zeff_squared: float, n: int, ell: int) -> float
 
 # Public API: wrapper function for backward compatibility
 def xkarsas(freq: float, zeff_squared: float, n: int, ell: int) -> float:
-    """Return the Karsas hydrogen cross-section coefficient.
-
-    Public API wrapper that calls JIT-compiled version if Numba is available,
-    otherwise uses pure Python fallback.
-    """
-    if NUMBA_AVAILABLE:
-        return _xkarsas_jit(
-            freq, zeff_squared, n, ell, FREQ_LOG, XN_LOG, XL_LOG_ARRAY, EKARSAS, LN10
-        )
-    else:
-        return _xkarsas_python(freq, zeff_squared, n, ell)
+    """Return the Karsas hydrogen cross-section coefficient."""
+    return _xkarsas_jit(
+        freq, zeff_squared, n, ell, FREQ_LOG, XN_LOG, XL_LOG_ARRAY, EKARSAS, LN10
+    )

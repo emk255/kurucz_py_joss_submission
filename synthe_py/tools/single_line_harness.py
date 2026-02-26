@@ -137,7 +137,6 @@ def main() -> int:
     parser.add_argument("--window", type=float, default=0.5, help="Half-width window around wavelength (nm)")
     parser.add_argument("--element", type=str, default="FE", help="Element symbol filter (e.g., FE)")
     parser.add_argument("--ion-stage", type=int, default=1, help="Ion stage filter (1=neutral)")
-    parser.add_argument("--microturb", type=float, default=0.0, help="Microturbulent velocity (km/s)")
     parser.add_argument("--resolution", type=float, default=300_000.0, help="Resolving power lambda/dlambda for grid")
     parser.add_argument("--cutoff", type=float, default=1e-3, help="Opacity cutoff factor (CUTOFF)")
     parser.add_argument("--output", type=Path, default=None, help="Optional NPZ output to save arrays")

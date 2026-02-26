@@ -15,22 +15,7 @@ import math
 import os
 import warnings
 
-try:
-    from numba import jit, prange
-
-    NUMBA_AVAILABLE = True
-except ImportError:
-    NUMBA_AVAILABLE = False
-
-    def jit(*args, **kwargs):
-        def decorator(func):
-            return func
-
-        return decorator
-
-    def prange(*args):
-        return range(*args)
-
+from numba import jit, prange
 
 from ._pfground_table import (
     FIRST_RANGE_LABELS,
@@ -2057,7 +2042,7 @@ def _pfsaha_exact_python(
                 f.write("\n")
 
         # Fast path: Use Numba kernel when debugging is disabled
-        use_numba_saha = NUMBA_AVAILABLE and not debug_pfsa
+        use_numba_saha = not debug_pfsa
 
         if use_numba_saha:
             # Use Numba kernel for Saha equation F computation

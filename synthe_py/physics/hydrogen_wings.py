@@ -6,22 +6,7 @@ from typing import Tuple
 
 import numpy as np
 
-try:
-    from numba import jit, prange
-
-    NUMBA_AVAILABLE = True
-except ImportError:
-    NUMBA_AVAILABLE = False
-
-    def jit(*args, **kwargs):
-        def decorator(func):
-            return func
-
-        return decorator
-
-    def prange(*args, **kwargs):
-        return range(*args)
-
+from numba import jit, prange
 
 from ..io.atmosphere import AtmosphereModel
 from .karsas_tables import (
@@ -381,120 +366,25 @@ def compute_hydrogen_wings(
 
     mlast = 1100.0 / np.power(xne, 0.133333333)
 
-    # Use JIT-compiled kernel if Numba is available
-    if NUMBA_AVAILABLE:
-        ahline, shline = _compute_hydrogen_wings_kernel(
-            freq,
-            xne,
-            bhyd,
-            bolt,
-            mlast,
-            hkt,
-            ehvkt,
-            stim,
-            bnu,
-            KNMTAB,
-            FSTARK,
-            RYD,
-            FREQ_LOG,
-            XN_LOG,
-            XL_LOG_ARRAY,
-            EKARSAS,
-            LN10,
-        )
-    else:
-        # Pure Python fallback (original implementation)
-        ahline = np.zeros((layers, nfreq), dtype=np.float64)
-        shline = np.zeros((layers, nfreq), dtype=np.float64)
-
-        for k in range(nfreq):
-            f = freq[k]
-            if f <= 0.0:
-                continue
-            n = int(np.sqrt(RYD / f))
-            if n <= 0 or n > 4:
-                continue
-            if n == 1 and f < 2.0e15:
-                continue
-            if n == 2 and f < 4.44e14:
-                continue
-
-            denom = (RYD / (n * n)) - f
-            if denom <= 0.0:
-                continue
-            mfreq = np.sqrt(RYD / denom)
-
-            eh_col = ehvkt[:, k]
-            stim_col = stim[:, k]
-            bnu_col = bnu[:, k]
-
-            base_m1 = int(mfreq)
-
-            for j in range(layers):
-                eh = eh_col[j]
-                stim_j = stim_col[j]
-                bnu_j = bnu_col[j]
-                hkt_j = hkt[j]
-
-                m1 = max(base_m1, n + 1)
-                m2 = m1 + 1
-                h_val = 0.0
-                s_val = 0.0
-
-                if m1 > 6 and m1 <= mlast[j]:
-                    m1 -= 1
-                    m2 += 3
-                    if n >= 4 and m1 <= 8:
-                        h_val = (
-                            _stark(3, 4, f, hkt_j, xne[j], KNMTAB, FSTARK, RYD)
-                            * (1.0 - eh * bhyd[j, 3] / bhyd[j, 2])
-                            * bolt[j, 2]
-                        )
-                        denom_sh = bhyd[j, 2] / bhyd[j, 3] - eh
-                        if abs(denom_sh) > 1e-12:
-                            s_val = h_val * bnu_j * stim_j / denom_sh
-
-                for m in range(m1, m2 + 1):
-                    bhydjm = 1.0
-                    if m <= 6:
-                        bhydjm = bhyd[j, m - 1]
-                    a = (
-                        _stark(n, m, f, hkt_j, xne[j], KNMTAB, FSTARK, RYD)
-                        * (1.0 - eh * bhydjm / bhyd[j, n - 1])
-                        * bolt[j, n - 1]
-                    )
-                    h_val += a
-                    denom_sh = bhyd[j, n - 1] / bhydjm - eh
-                    if abs(denom_sh) > 1e-12:
-                        s_val += a * bnu_j * stim_j / denom_sh
-
-                if h_val <= 0.0:
-                    sigma = xkarsas(f, 1.0, n, n)
-                    if sigma > 0.0 and n <= 6:
-                        denom_sh = bhyd[j, n - 1] - eh
-                        a = sigma * bolt[j, n - 1] * max(denom_sh, 0.0)
-                        h_val = max(a, 0.0)
-                        if abs(denom_sh) > 1e-12:
-                            s_val = h_val * bnu_j * stim_j / denom_sh
-                        else:
-                            s_val = h_val * bnu_j
-                    else:
-                        coeff = (
-                            _coulx(n, f, 1, RYD)
-                            * (1.0 - eh / bhyd[j, n - 1])
-                            * bolt[j, n - 1]
-                        )
-                        h_val = max(coeff, 0.0)
-                        denom_sh = bhyd[j, n - 1] - eh
-                        if abs(denom_sh) > 1e-12:
-                            s_val = h_val * bnu_j * stim_j / denom_sh
-                        else:
-                            s_val = h_val * bnu_j
-
-                ahline[j, k] = max(h_val, 0.0)
-                if h_val > 0.0:
-                    shline[j, k] = s_val / h_val
-
+    ahline, shline = _compute_hydrogen_wings_kernel(
+        freq,
+        xne,
+        bhyd,
+        bolt,
+        mlast,
+        hkt,
+        ehvkt,
+        stim,
+        bnu,
+        KNMTAB,
+        FSTARK,
+        RYD,
+        FREQ_LOG,
+        XN_LOG,
+        XL_LOG_ARRAY,
+        EKARSAS,
+        LN10,
+    )
     return ahline, shline
 
 
@@ -725,118 +615,28 @@ def compute_hydrogen_continuum(
     freq3 = HYDROGEN_CROSS_SECTION_COEFF / np.maximum(freq, 1e-30) ** 3
     waveno = freq / C_LIGHT_CM
 
-    # Use JIT-compiled kernel if Numba is available
-    if NUMBA_AVAILABLE:
-        ahyd, shyd = _compute_hydrogen_continuum_kernel(
-            freq,
-            waveno,
-            freq3,
-            xnfph,
-            rho,
-            bhyd,
-            hkt,
-            ehvkt,
-            stim,
-            bnu,
-            HIGH_LEVEL_TERMS_ARRAY,
-            LOW_LEVEL_TERMS_ARRAY,
-            C_LIGHT_CM,
-            RYDBERG_CM,
-            LYMAN_LIMIT,
-            BASE_LIMIT,
-            FREQ_LOG,
-            XN_LOG,
-            XL_LOG_ARRAY,
-            EKARSAS,
-            LN10,
-        )
-    else:
-        # Pure Python fallback (original implementation)
-        progress_interval = max(1, nfreq // 100)  # Log every 1% of frequencies
-        for k in range(nfreq):
-            if k % progress_interval == 0:
-                logger.info(
-                    f"Hydrogen continuum: processing frequency {k+1}/{nfreq} ({100*(k+1)/nfreq:.1f}%)"
-                )
-            f = freq[k]
-            if f <= 0.0:
-                continue
-
-            wn = waveno[k]
-            for j in range(layers):
-                stim_j = stim[j, k]
-                if stim_j <= 0.0:
-                    continue
-
-                hkt_j = hkt[j]
-                # CRITICAL FIX: Fortran uses HCKT = HKT * C_LIGHT_CM in hydrogen opacity
-                # From atlas7v_1.for line 1933: HCKT(J)=HKT(J)*2.99792458D10
-                # And line 4045 uses: 109677.576D0*HCKT(J)
-                hckt_j = hkt_j * C_LIGHT_CM
-                bnu_j = bnu[j, k]
-                eh = ehvkt[j, k]
-
-                prefactor = freq3[k] / np.maximum(RYDBERG_CM * hckt_j, 1e-30)
-                exp_hi = np.exp(-LYMAN_LIMIT * hckt_j)
-                exp_lo = np.exp(-max(BASE_LIMIT, LYMAN_LIMIT - wn) * hckt_j)
-                h_val = prefactor * (exp_lo - exp_hi) * stim_j
-                s_val = h_val * bnu_j
-
-                for n, threshold, coeff, exponent in HIGH_LEVEL_TERMS:
-                    if wn < threshold:
-                        break
-                    sigma = xkarsas(f, 1.0, n, n)
-                    if sigma <= 0.0:
-                        continue
-                    contrib = sigma * coeff * np.exp(-exponent * hckt_j) * stim_j
-                    h_val += contrib
-                    s_val += contrib * bnu_j
-
-                for n, threshold, coeff, exponent in LOW_LEVEL_TERMS:
-                    if wn < threshold:
-                        break
-                    sigma = xkarsas(f, 1.0, n, n)
-                    if sigma <= 0.0:
-                        continue
-                    bh = bhyd[j, n - 1]
-                    delta = bh - eh
-                    contrib = sigma * coeff * np.exp(-exponent * hckt_j) * delta
-                    h_val += contrib
-                    if abs(delta) > 1e-16:
-                        s_val += contrib * bnu_j * stim_j / delta
-                    else:
-                        s_val += contrib * bnu_j
-
-                if wn >= LYMAN_LIMIT:
-                    sigma = xkarsas(f, 1.0, 1, 1)
-                    if sigma > 0.0:
-                        delta = bhyd[j, 0] - eh
-                        contrib = sigma * 2.0 * delta
-                        h_val += contrib
-                        if abs(delta) > 1e-16:
-                            s_val += contrib * bnu_j * stim_j / delta
-                        else:
-                            s_val += contrib * bnu_j
-
-                # CRITICAL: Fortran HOP line 4140: H=H*XNFPH(J,1)/RHO(J)
-                # XNFPH from synthe.for comes from QXNFPEL (fort.10), which is population per unit mass (cm³/g)
-                # NOT number density (atoms/cm³)!
-                # So the formula is: opacity = h_val * (xnfph_per_mass) = h_val * (xnfph_density / rho)
-                # But if xnfph is already per unit mass, then: opacity = h_val * xnfph_per_mass
-                #
-                # However, Python's xnfph from POPS is number density (atoms/cm³), so we need to convert:
-                # xnfph_per_mass = xnfph_density / rho
-                # opacity = h_val * xnfph_per_mass = h_val * xnfph_density / rho
-                #
-                # This matches Fortran's formula exactly.
-                scale = xnfph[j, 0] / rho[j]
-                h_scaled = h_val * scale
-                if h_scaled <= 0.0:
-                    continue
-
-                s_scaled = s_val * scale
-                ahyd[j, k] = h_scaled
-                shyd[j, k] = s_scaled / max(h_scaled, 1e-40)
-
+    ahyd, shyd = _compute_hydrogen_continuum_kernel(
+        freq,
+        waveno,
+        freq3,
+        xnfph,
+        rho,
+        bhyd,
+        hkt,
+        ehvkt,
+        stim,
+        bnu,
+        HIGH_LEVEL_TERMS_ARRAY,
+        LOW_LEVEL_TERMS_ARRAY,
+        C_LIGHT_CM,
+        RYDBERG_CM,
+        LYMAN_LIMIT,
+        BASE_LIMIT,
+        FREQ_LOG,
+        XN_LOG,
+        XL_LOG_ARRAY,
+        EKARSAS,
+        LN10,
+    )
     logger.info("Hydrogen continuum computation complete")
     return ahyd, shyd

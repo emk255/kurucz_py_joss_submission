@@ -65,7 +65,6 @@ def main():
 
     else:
         print(f"Diagnostics file not found: {diag_path}")
-        print("Run synthesis with --diagnostics flag first")
 
 
 if __name__ == "__main__":

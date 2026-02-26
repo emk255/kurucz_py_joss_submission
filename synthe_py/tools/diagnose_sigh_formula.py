@@ -1,14 +1,20 @@
 #!/usr/bin/env python3
 """
-Detailed diagnosis of SIGH (hydrogen Rayleigh scattering) discrepancy.
+Detailed diagnosis of SIGH (hydrogen Rayleigh scattering) and continuum opacity at 300 nm.
 
 Fortran formula (atlas7v.for line 6932-6934):
     XSECT = 6.65D-25 * G**2
     SIGH(J) = XSECT * XNFPH(J,1) * 2. * BHYD(J,1) / RHO(J)
 
-This compares each factor between Python and Fortran.
+This compares each factor between Python and Fortran. Use --python-npz to pass
+validation npz when the default fortran-derived npz is not available.
+
+Usage:
+  python synthe_py/tools/diagnose_sigh_formula.py
+  python synthe_py/tools/diagnose_sigh_formula.py --python-npz results/validation_100/python_npz/at12_aaaaa_t02500g-1.0.npz
 """
 
+import argparse
 import sys
 from pathlib import Path
 
@@ -54,18 +60,53 @@ def compute_g_fortran(freq: float) -> float:
 
 
 def main():
-    """Detailed SIGH formula comparison."""
+    """Detailed SIGH formula and 300nm continuum opacity comparison."""
+    parser = argparse.ArgumentParser(
+        description="Diagnose SIGH (hydrogen Rayleigh) and continuum at 300 nm"
+    )
+    parser.add_argument(
+        "--python-npz",
+        type=Path,
+        default=None,
+        help="Python validation npz (e.g. results/validation_100/python_npz/at12_aaaaa_t02500g-1.0.npz)",
+    )
+    parser.add_argument(
+        "--wavelength",
+        type=float,
+        default=300.0,
+        help="Test wavelength in nm (default: 300)",
+    )
+    args = parser.parse_args()
+
+    root = Path(__file__).resolve().parents[2]
+    npz_candidates = []
+    if args.python_npz is not None:
+        p = root / args.python_npz if not Path(args.python_npz).is_absolute() else Path(args.python_npz)
+        npz_candidates.append(("Python validation", p))
+    npz_candidates.append(
+        ("Fortran-derived", root / "synthe_py/data/at12_aaaaa_atmosphere_fixed_interleaved.npz")
+    )
+    npz_candidates.append(
+        ("Python validation t02500", root / "results/validation_100/python_npz/at12_aaaaa_t02500g-1.0.npz")
+    )
+
+    atm = None
+    npz_path = None
+    for label, path in npz_candidates:
+        if path.exists():
+            atm = load_cached(path)
+            npz_path = path
+            print(f"Using {label}: {path}")
+            break
+
+    if atm is None:
+        print("ERROR: No atmosphere npz found. Try --python-npz <path>")
+        return 1
+
+    test_wavelength = args.wavelength
     print("=" * 80)
-    print("DETAILED SIGH (HYDROGEN RAYLEIGH SCATTERING) DIAGNOSIS")
+    print(f"DETAILED SIGH AND CONTINUUM OPACITY DIAGNOSIS at {test_wavelength:.1f} nm")
     print("=" * 80)
-    
-    # Load Fortran-derived atmosphere
-    fortran_npz_path = Path("synthe_py/data/at12_aaaaa_atmosphere_fixed_interleaved.npz")
-    if not fortran_npz_path.exists():
-        print(f"ERROR: {fortran_npz_path} not found")
-        return False
-    
-    atm = load_cached(fortran_npz_path)
     print(f"\nLoaded atmosphere: {atm.layers} layers")
     
     # Test wavelength
@@ -111,7 +152,7 @@ def main():
         print(f"BHYD(1,1) = {bhyd1[0]:.6E}")
     else:
         # Check if atlas_tables are embedded
-        data = np.load(fortran_npz_path, allow_pickle=True)
+        data = np.load(npz_path, allow_pickle=True)
         if 'bhyd' in data:
             bhyd = data['bhyd']
             if len(bhyd.shape) == 2 and bhyd.shape[1] > 0:
@@ -183,9 +224,28 @@ def main():
         print(f"  Implied Fortran U(T) = {implied_partition:.6f}")
         print(f"  Ratio: {partition_func[0] / implied_partition:.6f}")
         
+    # Report ACONT at 300nm if available (continuum absorption)
+    if atm.continuum_abs_coeff is not None and atm.continuum_wledge is not None:
+        print(f"\n--- Continuum absorption (ACONT) at {test_wavelength:.1f} nm ---")
+        wledge = np.abs(atm.continuum_wledge)
+        edge_idx = np.searchsorted(wledge, test_wavelength, side="right") - 1
+        edge_idx = np.clip(edge_idx, 0, len(wledge) - 2)
+        wl_left = wledge[edge_idx]
+        wl_right = wledge[edge_idx + 1]
+        half = atm.continuum_half_edge[edge_idx] if hasattr(atm, "continuum_half_edge") and atm.continuum_half_edge is not None else 0.5 * (wl_left + wl_right)
+        delta = wl_right - wl_left
+        c1 = (test_wavelength - half) * (test_wavelength - wl_right) / delta
+        c2 = (wl_left - test_wavelength) * (test_wavelength - wl_right) * 2.0 / delta
+        c3 = (test_wavelength - wl_left) * (test_wavelength - half) / delta
+        abs_coeff = atm.continuum_abs_coeff
+        log_abs = abs_coeff[0, edge_idx, 0] * c1 + abs_coeff[0, edge_idx, 1] * c2 + abs_coeff[0, edge_idx, 2] * c3
+        acont = 10.0**log_abs
+        print(f"  ACONT (layer 0): {acont:.6E} cm^2/g")
+        print(f"  Edge interval: [{wl_left:.2f}, {wl_right:.2f}] nm")
+
     # Now let's check what Fortran actually writes for BHYD
     print(f"\n--- Check BHYD Table in fort.10 ---")
-    fort10_path = Path("synthe/stmp_at12_aaaaa/fort.10")
+    fort10_path = root / "synthe/stmp_at12_aaaaa/fort.10"
     if fort10_path.exists():
         # Try to read BHYD directly from fort.10 using convert_fort10's logic
         import struct
@@ -243,9 +303,9 @@ Check if Fortran uses a different partition function formula or if
 BHYD already includes the partition function correction.
 """)
     
-    return True
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
 

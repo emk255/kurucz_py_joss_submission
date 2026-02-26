@@ -44,20 +44,28 @@ def compare_spectra(
     fortran_file: Path,
     wl_range: tuple[float, float] | None = None,
     top_n: int | None = None,
+    quiet: bool = False,
 ):
-    """Compare two spectra and print statistics."""
+    """Compare two spectra and print statistics.
 
-    print(f"Loading Python spectrum: {python_file}")
+    Returns a dict with keys: flux_mean_rel, flux_median_rel, flux_rms_rel,
+    flux_rms_rel_robust, cont_mean_rel, cont_median_rel, cont_rms_rel,
+    norm_mean, norm_median, norm_rms, n_points, wl_min, wl_max.
+    """
+
+    if not quiet:
+        print(f"Loading Python spectrum: {python_file}")
     py_wl, py_flux, py_cont = load_spectrum(python_file)
-    print(
-        f"  {len(py_wl)} points, wavelength range: {py_wl.min():.2f} - {py_wl.max():.2f} nm"
-    )
-
-    print(f"Loading Fortran spectrum: {fortran_file}")
+    if not quiet:
+        print(
+            f"  {len(py_wl)} points, wavelength range: {py_wl.min():.2f} - {py_wl.max():.2f} nm"
+        )
+        print(f"Loading Fortran spectrum: {fortran_file}")
     ft_wl, ft_flux, ft_cont = load_spectrum(fortran_file)
-    print(
-        f"  {len(ft_wl)} points, wavelength range: {ft_wl.min():.2f} - {ft_wl.max():.2f} nm"
-    )
+    if not quiet:
+        print(
+            f"  {len(ft_wl)} points, wavelength range: {ft_wl.min():.2f} - {ft_wl.max():.2f} nm"
+        )
 
     # Find common wavelength range
     wl_min = max(py_wl.min(), ft_wl.min())
@@ -67,7 +75,8 @@ def compare_spectra(
         wl_min = max(wl_min, wl_range[0])
         wl_max = min(wl_max, wl_range[1])
 
-    print(f"\nComparing in range: {wl_min:.2f} - {wl_max:.2f} nm")
+    if not quiet:
+        print(f"\nComparing in range: {wl_min:.2f} - {wl_max:.2f} nm")
 
     # Filter to common range
     py_mask = (py_wl >= wl_min) & (py_wl <= wl_max)
@@ -86,7 +95,8 @@ def compare_spectra(
     ft_cont_interp = np.interp(py_wl_common, ft_wl_common, ft_cont_common)
 
     n_points = len(py_wl_common)
-    print(f"Comparing {n_points} wavelength points")
+    if not quiet:
+        print(f"Comparing {n_points} wavelength points")
 
     # Relative differences in percent with explicit masked divide to avoid
     # divide-by-zero warnings and unstable tiny-denominator points.
@@ -124,41 +134,42 @@ def compare_spectra(
         else float("nan")
     )
 
-    print("\n" + "=" * 60)
-    print("SPECTRUM COMPARISON SUMMARY")
-    print("=" * 60)
-    print(f"\n{'Column':<20} {'Mean':<12} {'Median':<12} {'RMS':<12}")
-    print("-" * 56)
-    print(
-        f"{'Flux':<20} {np.mean(flux_rel):+.2f}%{'':<5} {np.median(flux_rel):+.2f}%{'':<5} {flux_rms:.2f}%"
-    )
-    print(
-        f"{'Flux (robust)':<20} {np.mean(flux_rel[robust_flux_mask]):+.2f}%{'':<5} "
-        f"{np.median(flux_rel[robust_flux_mask]):+.2f}%{'':<5} {flux_rms_robust:.2f}%"
-    )
-    print(
-        f"{'Continuum':<20} {np.mean(cont_rel):+.2f}%{'':<5} {np.median(cont_rel):+.2f}%{'':<5} {cont_rms:.2f}%"
-    )
-    print(
-        f"{'Normalized (F/C)':<20} {np.mean(norm_diff):+.4f}{'':<3} {np.median(norm_diff):+.4f}{'':<3} {np.sqrt(np.mean(norm_diff**2)):.4f}"
-    )
-    print()
+    if not quiet:
+        print("\n" + "=" * 60)
+        print("SPECTRUM COMPARISON SUMMARY")
+        print("=" * 60)
+        print(f"\n{'Column':<20} {'Mean':<12} {'Median':<12} {'RMS':<12}")
+        print("-" * 56)
+        print(
+            f"{'Flux':<20} {np.mean(flux_rel):+.2f}%{'':<5} {np.median(flux_rel):+.2f}%{'':<5} {flux_rms:.2f}%"
+        )
+        print(
+            f"{'Flux (robust)':<20} {np.mean(flux_rel[robust_flux_mask]):+.2f}%{'':<5} "
+            f"{np.median(flux_rel[robust_flux_mask]):+.2f}%{'':<5} {flux_rms_robust:.2f}%"
+        )
+        print(
+            f"{'Continuum':<20} {np.mean(cont_rel):+.2f}%{'':<5} {np.median(cont_rel):+.2f}%{'':<5} {cont_rms:.2f}%"
+        )
+        print(
+            f"{'Normalized (F/C)':<20} {np.mean(norm_diff):+.4f}{'':<3} {np.median(norm_diff):+.4f}{'':<3} {np.sqrt(np.mean(norm_diff**2)):.4f}"
+        )
+        print()
 
-    # Status check
-    cont_status = "✅" if cont_rms < 1.0 else "❌"
-    flux_status = "✅" if flux_rms < 1.0 else "❌"
-    flux_status_robust = "✅" if flux_rms_robust < 1.0 else "❌"
-    print(
-        f"Sub-percent accuracy: Continuum {cont_status}  Flux {flux_status}  "
-        + f"Flux(robust) {flux_status_robust}"
-    )
-    print(
-        f"Robust flux uses |Fortran flux| > {robust_flux_threshold:.3e} "
-        + f"({np.sum(robust_flux_mask)} / {len(robust_flux_mask)} points)"
-    )
-    print("=" * 60)
+        # Status check
+        cont_status = "✅" if cont_rms < 1.0 else "❌"
+        flux_status = "✅" if flux_rms < 1.0 else "❌"
+        flux_status_robust = "✅" if flux_rms_robust < 1.0 else "❌"
+        print(
+            f"Sub-percent accuracy: Continuum {cont_status}  Flux {flux_status}  "
+            + f"Flux(robust) {flux_status_robust}"
+        )
+        print(
+            f"Robust flux uses |Fortran flux| > {robust_flux_threshold:.3e} "
+            + f"({np.sum(robust_flux_mask)} / {len(robust_flux_mask)} points)"
+        )
+        print("=" * 60)
 
-    if top_n and top_n > 0:
+    if not quiet and top_n and top_n > 0:
         abs_frac = np.abs(flux_rel)
         order = np.argsort(abs_frac)[::-1]
         print("\nTop |fractional| flux outliers:")
@@ -183,7 +194,12 @@ def compare_spectra(
         "cont_mean_rel": np.mean(cont_rel),
         "cont_median_rel": np.median(cont_rel),
         "cont_rms_rel": cont_rms,
+        "norm_mean": np.mean(norm_diff),
+        "norm_median": np.median(norm_diff),
         "norm_rms": np.sqrt(np.mean(norm_diff**2)),
+        "n_points": n_points,
+        "wl_min": wl_min,
+        "wl_max": wl_max,
     }
 
 

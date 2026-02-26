@@ -31,12 +31,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="Destination path for the synthesized spectrum",
     )
     parser.add_argument(
-        "--diagnostics",
-        type=Path,
-        default=None,
-        help="Optional path for detailed synthesis diagnostics (.npz)",
-    )
-    parser.add_argument(
         "--wl-start", type=float, default=300.0, help="Start wavelength (nm)"
     )
     parser.add_argument(
@@ -47,12 +41,6 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=300_000.0,
         help="Resolving power lambda/dlambda",
-    )
-    parser.add_argument(
-        "--microturb",
-        type=float,
-        default=0.0,
-        help="Microturbulent velocity in km/s",
     )
     parser.add_argument(
         "--no-vacuum",
@@ -77,43 +65,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="Allow using tfort.* files as runtime line input (compatibility/debug mode only).",
     )
     parser.add_argument(
-        "--fort20",
-        type=Path,
-        default=None,
-        help="Optional fort.20 (line core) NPZ (deprecated, not used)",
-    )
-    parser.add_argument(
-        "--fort29",
-        type=Path,
-        default=None,
-        help="Optional fort.29 (ASYNTH) NPZ (deprecated, not used - wavelength grid built from config)",
-    )
-    parser.add_argument(
         "--n-workers",
         type=int,
         default=None,
         help="Number of parallel workers for radiative transfer (default: auto-detect, use 1 for sequential)",
-    )
-    parser.add_argument(
-        "--no-helium-wings",
-        action="store_true",
-        help="Disable detailed helium wing profiles (faster but less accurate)",
-    )
-    parser.add_argument(
-        "--skip-hydrogen-wings",
-        action="store_true",
-        help="Skip hydrogen wing computation (much faster, continuum only)",
-    )
-    parser.add_argument(
-        "--no-line-filter",
-        action="store_true",
-        help="Disable wavelength filtering of the line catalog (matches full SYNTHE runs but slower)",
-    )
-    parser.add_argument(
-        "--subsample",
-        type=int,
-        default=1,
-        help="Subsample wavelength grid by taking every Nth point (e.g., 2 = half points, 10 = 10x faster)",
     )
     parser.add_argument(
         "--nlte", action="store_true", help="Enable NLTE line source handling"
@@ -142,6 +97,18 @@ def build_parser() -> argparse.ArgumentParser:
         default="INFO",
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
         help="Verbosity level",
+    )
+    parser.add_argument(
+        "--diagnostics",
+        type=Path,
+        default=None,
+        help="Optional path for diagnostics output",
+    )
+    parser.add_argument(
+        "--microturb",
+        type=float,
+        default=0.0,
+        help="Microturbulent velocity (km/s)",
     )
     parser.add_argument(
         "--debug",
@@ -173,13 +140,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         nlte=args.nlte,
         scattering_iterations=args.scat_iterations,
         scattering_tolerance=args.scat_tol,
-        fort20=args.fort20,
-        fort29=args.fort29,
         rhoxj_scale=args.rhoxj,
-        enable_helium_wings=not args.no_helium_wings,
-        skip_hydrogen_wings=args.skip_hydrogen_wings,
-        line_filter=not args.no_line_filter,
-        wavelength_subsample=args.subsample,
         npz_path=args.npz,
         n_workers=args.n_workers,
         debug=args.debug,

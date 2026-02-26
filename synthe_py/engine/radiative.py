@@ -725,6 +725,29 @@ def _process_wavelength_batch(
     return idx, ft, fc
 
 
+def _process_wavelength_chunk(
+    chunk: list[
+        Tuple[
+            int,
+            float,
+            np.ndarray,
+            np.ndarray,
+            np.ndarray,
+            np.ndarray,
+            np.ndarray,
+            np.ndarray,
+            Optional[np.ndarray],
+            bool,
+        ]
+    ],
+) -> list[Tuple[int, float, float]]:
+    """Process a chunk of wavelengths with deterministic in-chunk ordering."""
+    out: list[Tuple[int, float, float]] = []
+    for args in chunk:
+        out.append(_process_wavelength_batch(args))
+    return out
+
+
 def solve_lte_spectrum(
     wavelength_nm: np.ndarray,
     temperature: np.ndarray,
@@ -810,6 +833,12 @@ def solve_lte_spectrum(
         319.493540,
         320.977293,
     ]
+    if debug:
+        debug_flags = np.ones(n_points, dtype=bool)
+    else:
+        debug_flags = np.zeros(n_points, dtype=bool)
+        for dwl in debug_wavelengths:
+            debug_flags |= np.abs(wavelength_nm - dwl) < 0.001
 
     # Log initial status
     logger.info(f"Solving radiative transfer for {n_points:,} wavelengths...")
@@ -823,30 +852,14 @@ def solve_lte_spectrum(
         logger.info(f"Using {n_workers} parallel workers")
     else:
         logger.info("Using sequential processing")
-
-    # Prepare arguments for processing
-    process_args = []
-    for idx in range(n_points):
-        wl = wavelength_nm[idx]
-        # Use global debug flag, or enable for specific wavelengths if debug=False
-        # Use 0.001 nm tolerance to match Fortran print precision and grid rounding.
-        debug_this = debug or any(abs(wl - dwl) < 0.001 for dwl in debug_wavelengths)
-        line_src_col = line_source[:, idx] if line_source is not None else None
-
-        process_args.append(
-            (
-                idx,
-                wl,
-                temperature,
-                column_mass,
-                cont_abs[:, idx],
-                cont_scat[:, idx],
-                line_opacity[:, idx],
-                line_scattering[:, idx],
-                line_src_col,
-                debug_this,
-            )
-        )
+    step2_rt_batching = os.getenv("PY_OPT_STEP2_RT_BATCH", "0") != "0"
+    rt_batch_size = 32
+    rt_batch_env = os.getenv("PY_RT_BATCH_SIZE")
+    if rt_batch_env:
+        try:
+            rt_batch_size = max(1, int(rt_batch_env))
+        except ValueError:
+            rt_batch_size = 32
 
     # Process wavelengths
     if n_workers > 1 and n_points > 100:  # Only parallelize for large grids
@@ -858,50 +871,104 @@ def solve_lte_spectrum(
         log_interval = max(1, n_points // 100)  # Log every 1%
         completed = 0
 
+        def _process_idx(idx: int) -> Tuple[int, float, float]:
+            line_src_col = line_source[:, idx] if line_source is not None else None
+            ft, fc = solve_lte_frequency(
+                float(wavelength_nm[idx]),
+                temperature,
+                column_mass,
+                cont_abs[:, idx],
+                cont_scat[:, idx],
+                line_opacity[:, idx],
+                line_scattering[:, idx],
+                line_src_col,
+                debug=bool(debug_flags[idx]),
+            )
+            return idx, ft, fc
+
+        def _process_idx_chunk(start_idx: int, end_idx: int) -> list[Tuple[int, float, float]]:
+            out: list[Tuple[int, float, float]] = []
+            for idx in range(start_idx, end_idx):
+                out.append(_process_idx(idx))
+            return out
+
         with ThreadPoolExecutor(max_workers=n_workers) as executor:
-            # Store wavelength values in a dict for error handling
-            idx_to_wavelength = {args[0]: args[1] for args in process_args}
-            futures = {
-                executor.submit(_process_wavelength_batch, args): args[0]
-                for args in process_args
-            }
+            if step2_rt_batching:
+                chunks = [
+                    (i, min(i + rt_batch_size, n_points))
+                    for i in range(0, n_points, rt_batch_size)
+                ]
+                futures = {
+                    executor.submit(_process_idx_chunk, chunk_start, chunk_end): (
+                        chunk_start,
+                        chunk_end,
+                    )
+                    for chunk_start, chunk_end in chunks
+                }
+            else:
+                futures = {
+                    executor.submit(_process_idx, idx): idx for idx in range(n_points)
+                }
 
             for future in as_completed(futures):
                 try:
-                    idx, ft, fc = future.result()
-                    flux_total[idx] = ft
-                    flux_cont[idx] = fc
-                    completed += 1
-
-                    # Progress logging
-                    if completed % log_interval == 0 or completed == n_points:
-                        percent = 100.0 * completed / n_points
-                        wl = idx_to_wavelength.get(idx, 0.0)
-                        logger.info(
-                            f"Progress: {completed:,}/{n_points:,} ({percent:.1f}%) - "
-                            f"wavelength {wl:.2f} nm"
-                        )
+                    result = future.result()
+                    if step2_rt_batching:
+                        for idx, ft, fc in result:
+                            flux_total[idx] = ft
+                            flux_cont[idx] = fc
+                            completed += 1
+                            if completed % log_interval == 0 or completed == n_points:
+                                percent = 100.0 * completed / n_points
+                                wl = float(wavelength_nm[idx]) if 0 <= idx < n_points else 0.0
+                                logger.info(
+                                    f"Progress: {completed:,}/{n_points:,} ({percent:.1f}%) - "
+                                    f"wavelength {wl:.2f} nm"
+                                )
+                    else:
+                        idx, ft, fc = result
+                        flux_total[idx] = ft
+                        flux_cont[idx] = fc
+                        completed += 1
+                        if completed % log_interval == 0 or completed == n_points:
+                            percent = 100.0 * completed / n_points
+                            wl = float(wavelength_nm[idx]) if 0 <= idx < n_points else 0.0
+                            logger.info(
+                                f"Progress: {completed:,}/{n_points:,} ({percent:.1f}%) - "
+                                f"wavelength {wl:.2f} nm"
+                            )
                 except Exception as e:
-                    idx = futures[future]
-                    wl = idx_to_wavelength.get(idx, 0.0)
-                    logger.error(
-                        f"Error processing wavelength {idx} ({wl:.2f} nm): {e}"
-                    )
-                    # Set to zero on error
-                    flux_total[idx] = 0.0
-                    flux_cont[idx] = 0.0
-                    completed += 1
+                    task_payload = futures[future]
+                    if step2_rt_batching:
+                        first_idx = task_payload[0]
+                        first_wl = (
+                            float(wavelength_nm[first_idx])
+                            if 0 <= first_idx < n_points
+                            else 0.0
+                        )
+                        logger.error(
+                            f"Error processing wavelength chunk starting at {first_idx} ({first_wl:.2f} nm): {e}"
+                        )
+                        for idx in range(task_payload[0], task_payload[1]):
+                            flux_total[idx] = 0.0
+                            flux_cont[idx] = 0.0
+                            completed += 1
+                    else:
+                        idx = task_payload
+                        wl = float(wavelength_nm[idx]) if 0 <= idx < n_points else 0.0
+                        logger.error(
+                            f"Error processing wavelength {idx} ({wl:.2f} nm): {e}"
+                        )
+                        flux_total[idx] = 0.0
+                        flux_cont[idx] = 0.0
+                        completed += 1
     else:
         # Sequential processing with progress logging
         log_interval = max(1, n_points // 100)  # Log every 1%
 
         for idx in range(n_points):
             wl = wavelength_nm[idx]
-            # Use global debug flag, or enable for specific wavelengths if debug=False
-            # Use 0.001 nm tolerance to match Fortran print precision and grid rounding.
-            debug_this = debug or any(
-                abs(wl - dwl) < 0.001 for dwl in debug_wavelengths
-            )
+            debug_this = bool(debug_flags[idx])
 
             line_src_col = line_source[:, idx] if line_source is not None else None
             ft, fc = solve_lte_frequency(

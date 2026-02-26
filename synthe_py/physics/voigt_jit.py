@@ -10,17 +10,7 @@ from __future__ import annotations
 
 import numpy as np
 
-try:
-    from numba import jit
-
-    NUMBA_AVAILABLE = True
-except ImportError:
-    NUMBA_AVAILABLE = False
-
-    def jit(*args, **kwargs):  # type: ignore[no-redef]
-        def decorator(func):
-            return func
-        return decorator
+from numba import jit
 
 
 @jit(nopython=True, cache=True)

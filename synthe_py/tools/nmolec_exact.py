@@ -20,22 +20,7 @@ import numpy as np
 # but compute element equations with float64 to match Fortran's binary rounding
 getcontext().prec = 50
 
-try:
-    from numba import jit, prange
-
-    NUMBA_AVAILABLE = True
-except ImportError:
-    NUMBA_AVAILABLE = False
-
-    def jit(*args, **kwargs):
-        def decorator(func):
-            return func
-
-        return decorator
-
-    def prange(*args):
-        return range(*args)
-
+from numba import jit, prange
 
 # Constants
 MAXMOL = 200
@@ -2108,10 +2093,9 @@ def _accumulate_molecules_atlas7(
     trace_electron_contrib = _should_trace_electron_contrib(layer_index)
     trace_metadata = trace_eq_accum
 
-    # Fast path: Use Numba kernel when tracing is disabled and Numba is available
+    # Fast path: Use Numba kernel when tracing is disabled
     use_numba_kernel = (
-        NUMBA_AVAILABLE
-        and not trace_eq_accum
+        not trace_eq_accum
         and not trace_electron_layer
         and trace_callback is None
         and nonfinite_callback is None
@@ -3814,27 +3798,20 @@ def nmolec_exact(
                                 f"NCOMP={ncomp} ION={ion}"
                             )
 
-                        # CRITICAL FIX: PFSAHA must use the SAME electron_density[j] as TERM calculation
-                        # Fortran uses XNE(J) from COMMON /STATE/ which is set to X = XNTOT/20 at line 3679
-                        # Python's pfsaha_func might use electron_density from closure (original value)
-                        # We need to ensure PFSAHA uses electron_density[j] which is XNTOT/20
-                        # Pass electron_density[j] explicitly if pfsaha_func supports it
-                        # For now, ensure electron_density[j] = x before calling PFSAHA
-                        xne_current = electron_density[j]
+                        # Match Fortran NMOLEC/PFSAHA: use the live XNE(J) state directly.
+                        # Do not substitute a separate seed value before PFSAHA calls.
                         if id_elem == 11 and j == 59:
                             prev_pressure = gas_pressure[j - 1] if j > 0 else float("nan")
                             prev_xne = xne_computed[j - 1] if j > 0 else float("nan")
                             with open("logs/pfsaha_na_state_python.log", "a") as fh:
                                 fh.write(
                                     "PY_PFSAHA_NA_STATE: "
-                                    f"J={j+1:03d} XNE_CUR={xne_current:.6e} "
+                                    f"J={j+1:03d} XNE_CUR={electron_density[j]:.6e} "
                                     f"XNE_SEED={xne_seed[j]:.6e} XNE_COMP={xne_computed[j]:.6e} "
                                     f"P={gas_pressure[j]:.6e} PPREV={prev_pressure:.6e} "
                                     f"XNE_PREV={prev_xne:.6e}\n"
                                 )
-                        electron_density[j] = xne_seed[j]
                         pfsaha_func(j, id_elem, ncomp, 12, frac, 0)
-                        electron_density[j] = xne_current
 
                         if trace_pfsa:
                             preview_len = min(max(ncomp, 2), 5)
@@ -4381,8 +4358,7 @@ def nmolec_exact(
 
             # Fast path: Use Numba kernel when tracing is disabled
             use_numba_element_setup = (
-                NUMBA_AVAILABLE
-                and not debug_xn
+                not debug_xn
                 and not (j == 0 and iteration < 4)
                 and not (j == 0 and iteration <= 2)
             )
@@ -7059,12 +7035,7 @@ def _solvit(
 
     # Fast path: Use kernel when tracing is disabled
     if not tracing_enabled:
-        if NUMBA_AVAILABLE:
-            # Use Numba-compiled kernel for maximum performance
-            _solvit_kernel(a_work, b_work, ipivot, n)
-        else:
-            # Fallback to Python kernel if Numba not available
-            _solvit_kernel_python(a_work, b_work, ipivot, n)
+        _solvit_kernel(a_work, b_work, ipivot, n)
         return b_work[1:]
 
     # Slow path: Original code with logging
