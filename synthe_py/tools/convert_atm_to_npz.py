@@ -2953,7 +2953,7 @@ if __name__ == "__main__":
 
         try:
 
-            from embed_atlas_tables import embed_atlas_tables
+            from synthe_py.tools.embed_atlas_tables import embed_atlas_tables
 
             print(f"Embedding atlas tables from {args.atlas_tables}...")
 

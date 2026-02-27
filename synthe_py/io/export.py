@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Iterable
 
 import numpy as np
 
@@ -22,9 +21,3 @@ def write_spec_file(result: SynthResult, destination: Path) -> None:
     np.savetxt(destination, data, fmt="%15.8f %11.6E %11.6E")
 
 
-def write_lines_used(lines: Iterable[int], destination: Path) -> None:
-    """Persist the indices of lines contributing to the spectrum."""
-
-    with destination.open("w", encoding="ascii") as fh:
-        for line_id in lines:
-            fh.write(f"{line_id}\n")

@@ -2,6 +2,8 @@
 results/
 logs/
 
+# Validation data (downloaded from Drive, not in repo)
+fortran_specs/
+
 # Line cache (large, regenerated on first run)
 synthe_py/out/
-synthe_py/out

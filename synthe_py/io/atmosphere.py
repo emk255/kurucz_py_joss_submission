@@ -79,20 +79,6 @@ class AtmosphereModel:
         return self.temperature.size
 
 
-def load_atlas12(path: Path) -> AtmosphereModel:
-    """Parse an ATLAS12 formatted atmosphere file.
-
-    The legacy binary format is complex; the Python version adopts a simple
-    ASCII-based intermediate representation. Until the converter is
-    implemented this function raises ``NotImplementedError`` to signal
-    downstream code to rely on pre-converted numpy archives.
-    """
-
-    raise NotImplementedError(
-        "ATLAS12 reader not yet implemented. Convert to numpy archive first."
-    )
-
-
 def load_cached(path: Path) -> AtmosphereModel:
     """Load a cached numpy `.npz` representation of the atmosphere."""
 

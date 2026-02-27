@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import math
 import logging
 import os
@@ -19,7 +18,7 @@ from numba import jit, prange
 
 from ..config import SynthesisConfig
 from ..io import atmosphere, export
-from ..io.lines import atomic, compiler as line_compiler, fort19 as fort19_io, tfort
+from ..io.lines import atomic, compiler as line_compiler, fort19 as fort19_io
 from ..io import spectrv as spectrv_io
 from ..physics import (
     bfudge,
@@ -420,42 +419,6 @@ _ELEMENT_SYMBOL_BY_Z = {value: key for key, value in _ELEMENT_Z.items()}
 _EMPTY_FLOAT64: np.ndarray = np.empty(0, dtype=np.float64)
 
 
-def _agent_load_fortran_spec(stem: str) -> Optional[np.ndarray]:
-    repo_root = Path(__file__).resolve().parents[2]
-    spec_path = repo_root / "results/validation_100/fortran_specs" / f"{stem}.spec"
-    if not spec_path.exists():
-        return None
-    try:
-        return np.loadtxt(spec_path, usecols=(0, 1, 2), dtype=np.float64)
-    except Exception:
-        # Some Fortran .spec rows can omit whitespace before negative flux values
-        # (e.g., "300.03840812-0.775425E-15 ..."), which breaks loadtxt tokenization.
-        # Fallback: extract float-like tokens via regex per line.
-        float_pattern = re.compile(r"[+-]?\d+(?:\.\d+)?(?:[Ee][+-]?\d+)?")
-        rows: List[Tuple[float, float, float]] = []
-        try:
-            with open(spec_path, "r", encoding="utf-8", errors="ignore") as fp:
-                for raw_line in fp:
-                    line = raw_line.strip()
-                    if not line:
-                        continue
-                    tokens = float_pattern.findall(line)
-                    if len(tokens) < 3:
-                        continue
-                    try:
-                        wl = float(tokens[0])
-                        flux = float(tokens[1])
-                        cont = float(tokens[2])
-                    except ValueError:
-                        continue
-                    rows.append((wl, flux, cont))
-            if not rows:
-                return None
-            return np.asarray(rows, dtype=np.float64)
-        except Exception:
-            return None
-
-
 def _load_atmosphere(cfg: SynthesisConfig) -> atmosphere.AtmosphereModel:
     model_path = cfg.atmosphere.model_path
 
@@ -560,237 +523,6 @@ def _load_atmosphere(cfg: SynthesisConfig) -> atmosphere.AtmosphereModel:
     )
 
 
-def _recompute_population_per_ion(atm: atmosphere.AtmosphereModel) -> None:
-    logger = logging.getLogger(__name__)
-    if (
-        atm.xabund is None
-        or atm.xnatm is None
-        or atm.tkev is None
-        or atm.tk is None
-        or atm.hkt is None
-        or atm.hckt is None
-        or atm.tlog is None
-    ):
-        logger.warning(
-            "Skipping population_per_ion recompute (missing xabund/xnatm or thermo arrays)."
-        )
-        return
-
-    logger.info("Recomputing population_per_ion using POPS exact (Fortran matching).")
-    pops_exact.load_fortran_data()
-
-    # Reset POPS iteration state to match fresh xnfpelsyn behavior.
-    if hasattr(pops_exact, "_ITEMP"):
-        pops_exact._ITEMP = 0
-    if hasattr(pops_exact, "_ITEMP1"):
-        pops_exact._ITEMP1 = 0
-
-    n_layers = atm.layers
-    population = np.zeros((n_layers, 6, 139), dtype=np.float64)
-    xne = np.asarray(atm.electron_density, dtype=np.float64).copy()
-    xnatm = np.asarray(atm.xnatm, dtype=np.float64).copy()
-
-    def get_element_code(elem_num: int) -> float:
-        code_map = {
-            1: 1.01,
-            2: 2.02,
-            3: 3.03,
-            4: 4.03,
-            5: 5.03,
-            6: 6.05,
-            7: 7.05,
-            8: 8.05,
-            9: 9.05,
-            10: 10.05,
-            11: 11.05,
-            12: 12.05,
-            13: 13.05,
-            14: 14.05,
-            15: 15.05,
-            16: 16.05,
-            17: 17.04,
-            18: 18.04,
-            19: 19.04,
-            20: 20.09,
-            21: 21.09,
-            22: 22.09,
-            23: 23.09,
-            24: 24.09,
-            25: 25.09,
-            26: 26.09,
-            27: 27.09,
-            28: 28.09,
-        }
-        return code_map.get(elem_num, float(elem_num) + 0.02)
-
-    for elem_num in range(1, 100):
-        number = np.zeros((n_layers, 10), dtype=np.float64)
-        code = get_element_code(elem_num)
-        pops_exact.pops_exact(
-            code,
-            11,
-            number,
-            np.asarray(atm.temperature, dtype=np.float64),
-            np.asarray(atm.tkev, dtype=np.float64),
-            np.asarray(atm.tk, dtype=np.float64),
-            np.asarray(atm.hkt, dtype=np.float64),
-            np.asarray(atm.hckt, dtype=np.float64),
-            np.asarray(atm.tlog, dtype=np.float64),
-            np.asarray(atm.gas_pressure, dtype=np.float64),
-            xne,
-            xnatm,
-            np.asarray(atm.xabund, dtype=np.float64),
-        )
-        population[:, :6, elem_num - 1] = number[:, :6]
-
-    atm.population_per_ion = population
-
-
-def _load_line_data(
-    cfg: SynthesisConfig,
-    wl_min: float,
-    wl_max: float,
-) -> atomic.LineCatalog:
-    """Load line catalog from atomic catalog file."""
-    _logger = logging.getLogger(__name__)
-    catalog: Optional[atomic.LineCatalog] = None
-    is_fort19_catalog = False
-    is_tfort12_catalog = False
-    is_tfort14_catalog = False
-    if cfg.line_data.atomic_catalog is not None:
-        try:
-            _logger.info(f"Loading atomic catalog from: {cfg.line_data.atomic_catalog}")
-            catalog_path = Path(cfg.line_data.atomic_catalog)
-            suffix = catalog_path.suffix.lower()
-            if suffix == ".12" and "fort.12" in catalog_path.name:
-                tfort12_records = tfort.parse_tfort12(catalog_path)
-                tfort93_path = catalog_path.with_suffix(".93")
-                if not tfort93_path.exists():
-                    raise RuntimeError(
-                        "tfort.12 requires companion tfort.93 for WLBEG/RATIO (Fortran exact behavior)."
-                    )
-                t93 = tfort.parse_tfort93(tfort93_path)
-                ratio = t93.ratio
-                rlog = t93.ratiolg if t93.ratiolg != 0.0 else math.log(ratio)
-                ixwlbeg = math.floor(math.log(t93.wlbeg) / rlog)
-                if math.exp(ixwlbeg * rlog) < t93.wlbeg:
-                    ixwlbeg += 1
-                wbegin = math.exp(ixwlbeg * rlog)
-                cgf_constant = 0.026538 / 1.77245
-                records: List[atomic.LineRecord] = []
-                for rec in tfort12_records:
-                    wl = wbegin * (ratio ** (rec.nbuff - 1))
-                    if wl <= 0.0:
-                        continue
-                    freq_hz = C_LIGHT_NM / wl
-                    gf_linear = rec.cgf * freq_hz / cgf_constant
-                    log_gf = math.log10(gf_linear) if gf_linear > 0.0 else -99.0
-                    nelion = rec.nelion
-                    if nelion <= 0:
-                        continue
-                    elem_z = (nelion - 1) // 6 + 1
-                    ion_stage = nelion - 6 * (elem_z - 1)
-                    element = _ELEMENT_SYMBOL_BY_Z.get(elem_z)
-                    if element is None or ion_stage <= 0:
-                        continue
-                    # tfort.12 gamma values are PRE-NORMALIZED by rgfall.for
-                    # (lines 271-273):
-                    #   GAMMAR = GAMMAR / 12.5664 / FRELIN
-                    # where 12.5664 = 4π and FRELIN = c/λ (Hz).
-                    # So GAMRF = γ_linear / (4πν).
-                    #
-                    # The ADAMP formula must use: ADAMP = gamma_total / DOPPLE
-                    # (matching Fortran synthe.for line 473) — NOT gamma / (4π*ν*DOPPLE).
-                    # Both line_opacity.py and opacity.py now use gamma_total / dopple.
-                    records.append(
-                        atomic.LineRecord(
-                            wavelength=wl,
-                            index_wavelength=wl,
-                            element=element,
-                            ion_stage=ion_stage,
-                            log_gf=log_gf,
-                            excitation_energy=rec.elo_cm,
-                            gamma_rad=rec.gamma_rad,
-                            gamma_stark=rec.gamma_stark,
-                            gamma_vdw=rec.gamma_vdw,
-                            metadata={"cgf": float(rec.cgf)},
-                            line_type=0,
-                            n_lower=0,
-                            n_upper=0,
-                        )
-                    )
-                catalog = atomic.LineCatalog.from_records(records)
-                is_tfort12_catalog = True
-                _logger.info("Loaded %d lines from tfort.12", len(catalog.records))
-                is_tfort12_catalog = True
-            elif suffix == ".14" and "fort.14" in catalog_path.name:
-                tfort14_records = tfort.parse_tfort14(catalog_path)
-                records: List[atomic.LineRecord] = []
-                for rec in tfort14_records:
-                    line_type = 0
-                    if rec.element_symbol == "H" and rec.ion_stage == 1:
-                        line_type = -1
-                    elif rec.element_symbol == "He" and rec.ion_stage == 1:
-                        line_type = -3
-                    elif rec.element_symbol == "He" and rec.ion_stage == 2:
-                        line_type = -6
-                    gf_linear = rec.gf if rec.gf > 0.0 else 0.0
-                    log_gf = math.log10(gf_linear) if gf_linear > 0.0 else rec.log_gf
-                    records.append(
-                        atomic.LineRecord(
-                            wavelength=rec.wavelength_vac,
-                            index_wavelength=rec.wavelength_vac,
-                            element=rec.element_symbol,
-                            ion_stage=rec.ion_stage,
-                            log_gf=log_gf,
-                            excitation_energy=rec.excitation_energy_cm,
-                            gamma_rad=rec.gamma_rad,
-                            gamma_stark=rec.gamma_stark,
-                            gamma_vdw=rec.gamma_vdw,
-                            metadata={},
-                            line_type=line_type,
-                            n_lower=rec.n_lower or 0,
-                            n_upper=rec.n_upper or 0,
-                        )
-                    )
-                catalog = atomic.LineCatalog.from_records(records)
-                _logger.info("Loaded %d lines from tfort.14", len(catalog.records))
-                is_tfort14_catalog = True
-            elif suffix in {".19", ".npz"} and "fort.19" in catalog_path.name:
-                fort19_data = fort19_io.load(catalog_path)
-                catalog = _catalog_from_fort19(fort19_data)
-                is_fort19_catalog = True
-                _logger.info(
-                    "Loaded %d lines from fort.19/tfort.19", len(catalog.records)
-                )
-            else:
-                catalog = atomic.load_catalog(catalog_path)
-                _logger.info(f"Loaded {len(catalog.records)} lines from catalog")
-        except (FileNotFoundError, ValueError) as e:
-            _logger.error(
-                f"Could not load atomic line catalog {cfg.line_data.atomic_catalog}: {e}"
-            )
-            raise RuntimeError(
-                f"Failed to load atomic catalog from {cfg.line_data.atomic_catalog}. "
-                f"Please check that the file exists and is a valid atomic line catalog."
-            ) from e
-
-    if catalog is None:
-        raise RuntimeError(
-            "No atomic catalog provided. "
-            "An atomic line catalog is required for line synthesis. "
-            "Please provide --atomic-catalog or use the 'atomic' positional argument."
-        )
-
-    if is_fort19_catalog or is_tfort12_catalog or is_tfort14_catalog:
-        filtered_catalog = catalog
-    elif cfg.line_filter:
-        filtered_catalog = atomic.filter_by_range(catalog, wl_min, wl_max)
-    else:
-        filtered_catalog = catalog
-    return filtered_catalog
-
-
 def _build_wavelength_grid(cfg: SynthesisConfig) -> np.ndarray:
     start = cfg.wavelength_grid.start
     end = cfg.wavelength_grid.end
@@ -860,30 +592,6 @@ def _nearest_grid_indices(grid: np.ndarray, values: np.ndarray) -> np.ndarray:
     return indices
 
 
-def _match_catalog_to_fort9(
-    catalog_wavelength: np.ndarray, meta_wavelength: np.ndarray, tolerance: float = 1e-3
-) -> Dict[int, int]:
-    """Build a mapping from catalog index to fort.9 metadata index."""
-
-    mapping: Dict[int, int] = {}
-    if catalog_wavelength.size == 0 or meta_wavelength.size == 0:
-        return mapping
-
-    indices = np.searchsorted(catalog_wavelength, meta_wavelength)
-    for meta_idx, pos in enumerate(indices):
-        best_idx: Optional[int] = None
-        best_delta = tolerance
-        for candidate in (pos, pos - 1):
-            if 0 <= candidate < catalog_wavelength.size:
-                delta = abs(catalog_wavelength[candidate] - meta_wavelength[meta_idx])
-                if delta < best_delta:
-                    best_delta = delta
-                    best_idx = candidate
-        if best_idx is not None and best_idx not in mapping:
-            mapping[best_idx] = meta_idx
-    return mapping
-
-
 def _match_catalog_to_fort19(
     catalog_wavelength: np.ndarray, meta_wavelength: np.ndarray, tolerance: float = 1e-3
 ) -> Dict[int, int]:
@@ -926,40 +634,6 @@ def _layer_value(arr: Optional[np.ndarray], idx: int) -> float:
 def _element_atomic_number(symbol: str) -> Optional[int]:
     key = symbol.strip().upper().replace(" ", "")
     return _ELEMENT_Z.get(key)
-
-
-def _catalog_from_fort19(fort19_data: fort19_io.Fort19Data) -> atomic.LineCatalog:
-    """Build a LineCatalog from a fort.19/tfort.19 file."""
-    records: List[atomic.LineRecord] = []
-    for idx in range(fort19_data.wavelength_vacuum.size):
-        wl = float(fort19_data.wavelength_vacuum[idx])
-        nelion = int(fort19_data.ion_index[idx])
-        if nelion <= 0:
-            continue
-        elem_z = (nelion - 1) // 6 + 1
-        ion_stage = nelion - 6 * (elem_z - 1)
-        element = _ELEMENT_SYMBOL_BY_Z.get(elem_z)
-        if element is None or ion_stage <= 0:
-            continue
-        gf = float(fort19_data.oscillator_strength[idx])
-        log_gf = math.log10(gf) if gf > 0.0 else -99.0
-        rec = atomic.LineRecord(
-            wavelength=wl,
-            index_wavelength=wl,
-            element=element,
-            ion_stage=ion_stage,
-            log_gf=log_gf,
-            excitation_energy=float(fort19_data.energy_lower[idx]),
-            gamma_rad=float(fort19_data.gamma_rad[idx]),
-            gamma_stark=float(fort19_data.gamma_stark[idx]),
-            gamma_vdw=float(fort19_data.gamma_vdw[idx]),
-            metadata={"cgf": gf},
-            line_type=int(fort19_data.line_type[idx]),
-            n_lower=int(fort19_data.n_lower[idx]),
-            n_upper=int(fort19_data.n_upper[idx]),
-        )
-        records.append(rec)
-    return atomic.LineCatalog.from_records(records)
 
 
 @jit(nopython=True, cache=True)
@@ -2489,72 +2163,31 @@ def run_synthesis(cfg: SynthesisConfig) -> SynthResult:
     if cfg.wavelength_subsample > 1:
         logger.info(f"  Subsample active: every {cfg.wavelength_subsample} points")
 
-    # Fortran-generated metadata inputs are only required for explicit tfort.* runs.
     catalog_path = Path(cfg.line_data.atomic_catalog)
-    suffix = catalog_path.suffix.lower()
-    is_tfort_catalog = suffix in {".12", ".14"} and "fort.1" in catalog_path.name
-    if is_tfort_catalog:
-        if not cfg.line_data.allow_tfort_runtime:
-            raise RuntimeError(
-                "tfort.* runtime input is disabled by default. "
-                "Use gfallvac.latest for self-contained runtime or pass --allow-tfort-runtime for compatibility mode."
-            )
-        logger.info("Fortran metadata inputs enabled: tfort.19/tfort.93")
-    else:
-        logger.info(
-            "Using self-contained Python line compiler metadata (no tfort runtime inputs)"
-        )
+    logger.info(
+        "Using self-contained Python line compiler metadata (no tfort runtime inputs)"
+    )
     logger.info("Allocating buffers...")
     buffers = allocate_buffers(wavelength, atm.layers)
 
     logger.info("Loading line catalog...")
     t_stage = time.perf_counter()
-    if is_tfort_catalog:
-        catalog = _load_line_data(cfg, wavelength.min(), wavelength.max())
-        tfort19_path = catalog_path.with_suffix(".19")
-        tfort19_npz = catalog_path.parent / "tfort19.npz"
-        if tfort19_npz.exists():
-            logger.info("Loading tfort.19 metadata from: %s", tfort19_npz)
-            fort19_data = fort19_io.load(tfort19_npz)
-        elif tfort19_path.exists():
-            logger.info("Loading tfort.19 metadata from: %s", tfort19_path)
-            fort19_data = fort19_io.load(tfort19_path)
-        else:
-            raise RuntimeError(
-                "tfort.12/14 requires companion tfort.19 for exact Fortran behavior."
-            )
-        if suffix == ".12" and fort19_data is not None:
-            fort19_catalog = _catalog_from_fort19(fort19_data)
-            extra_records = [
-                rec
-                for rec in fort19_catalog.records
-                if rec.line_type < 0 or rec.line_type == 1 or rec.line_type > 3
-            ]
-            if extra_records:
-                catalog = atomic.LineCatalog.from_records(
-                    list(catalog.records) + extra_records
-                )
-                logger.info(
-                    "Augmented tfort.12 catalog with %d H/He/auto/merged lines from tfort.19",
-                    len(extra_records),
-                )
-    else:
-        compiled_lines = line_compiler.compile_atomic_catalog(
-            catalog_path=catalog_path,
-            wlbeg=cfg.wavelength_grid.start,
-            wlend=cfg.wavelength_grid.end,
-            resolution=cfg.wavelength_grid.resolution,
-            line_filter=cfg.line_filter,
-            cache_directory=cfg.line_data.cache_directory,
-        )
-        catalog = compiled_lines.catalog
-        fort19_data = compiled_lines.fort19_data
-        logger.info(
-            "Compiled line metadata from catalog (contract=%s, lines=%d, fort19=%d)",
-            line_compiler.LINE_COMPILER_CONTRACT.nbuff_indexing,
-            len(catalog.records),
-            len(fort19_data.wavelength_vacuum),
-        )
+    compiled_lines = line_compiler.compile_atomic_catalog(
+        catalog_path=catalog_path,
+        wlbeg=cfg.wavelength_grid.start,
+        wlend=cfg.wavelength_grid.end,
+        resolution=cfg.wavelength_grid.resolution,
+        line_filter=cfg.line_filter,
+        cache_directory=cfg.line_data.cache_directory,
+    )
+    catalog = compiled_lines.catalog
+    fort19_data = compiled_lines.fort19_data
+    logger.info(
+        "Compiled line metadata from catalog (contract=%s, lines=%d, fort19=%d)",
+        line_compiler.LINE_COMPILER_CONTRACT.nbuff_indexing,
+        len(catalog.records),
+        len(fort19_data.wavelength_vacuum),
+    )
     has_lines = len(catalog.records) > 0
     logger.info(f"Catalog: {len(catalog.records)} lines")
     _timings["line catalog"] = time.perf_counter() - t_stage
@@ -2634,41 +2267,6 @@ def run_synthesis(cfg: SynthesisConfig) -> SynthResult:
 
     cont_kapmin_full = None
     wavelength_full = None
-    if is_tfort_catalog:
-        tfort93_path = catalog_path.with_suffix(".93")
-        if not tfort93_path.exists():
-            raise RuntimeError(
-                "tfort.12/14 requires companion tfort.93 for exact Fortran KAPMIN grid."
-            )
-        t93 = tfort.parse_tfort93(tfort93_path)
-        wavelength_full = []
-        wl = t93.wlbeg
-        while wl <= t93.wlend * (1.0 + 1e-9):
-            wavelength_full.append(wl)
-            wl *= t93.ratio
-        wavelength_full = np.array(wavelength_full, dtype=np.float64)
-        t_full = time.perf_counter()
-        cont_abs_full, cont_scat_full, _, _ = continuum.build_depth_continuum(
-            atm, wavelength_full
-        )
-        cont_kapmin_full = cont_abs_full + cont_scat_full
-        if not np.any(cont_kapmin_full):
-            if atm.continuum_abs_coeff is not None and atm.continuum_wledge is not None:
-                ablog = np.asarray(atm.continuum_abs_coeff[0], dtype=np.float64).T
-                cont_tables = tables.build_continuum_tables(
-                    tuple(float(x) for x in atm.continuum_wledge.tolist()),
-                    tuple(float(x) for x in ablog.ravel().tolist()),
-                )
-                log_cont = continuum.interpolate_continuum(cont_tables, wavelength_full)
-                cont = continuum.finalize_continuum(log_cont)
-                cont_kapmin_full = np.tile(cont, (atm.layers, 1))
-            else:
-                cont_kapmin_full = None
-        logger.info(
-            "Timing: full-grid KAPMIN in %.3fs (%d points)",
-            time.perf_counter() - t_full,
-            wavelength_full.size if wavelength_full is not None else 0,
-        )
     logger.info("Computing hydrogen continuum...")
     t_stage = time.perf_counter()
     ahyd_cont, shyd_cont = compute_hydrogen_continuum(
@@ -2809,8 +2407,6 @@ def run_synthesis(cfg: SynthesisConfig) -> SynthResult:
         # Apply scattering factor
         rhox = atm.depth
         rhox_scale = cfg.rhoxj_scale
-        if rhox_scale <= 0.0 and spectrv_params is not None:
-            rhox_scale = spectrv_params.rhoxj
         if rhox_scale > 0.0:
             fscat = np.exp(-rhox / rhox_scale)
         else:
@@ -2823,7 +2419,6 @@ def run_synthesis(cfg: SynthesisConfig) -> SynthResult:
         absorption = asynth * (1.0 - fscat[:, None])
         scattering = asynth * fscat[:, None]
 
-        buffers.line_opacity[:] = absorption
         # Mark that we're using ASYNTH (computed from catalog)
         buffers._using_asynth = True
 
@@ -2841,7 +2436,6 @@ def run_synthesis(cfg: SynthesisConfig) -> SynthResult:
             )
             absorption[inf_mask] = MAX_OPACITY
 
-        # Assign absorption to line_opacity (with overflow protection applied)
         buffers.line_opacity[:] = absorption
         buffers.line_scattering[:] = scattering
 
