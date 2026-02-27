@@ -8,7 +8,6 @@ import json
 import math
 import os
 from pathlib import Path
-import time
 from typing import Optional
 
 import numpy as np
@@ -20,36 +19,6 @@ _C_LIGHT_NM = 2.99792458e17
 _CGF_CONSTANT = 0.026538 / 1.77245
 _COMPILED_CACHE_SCHEMA = 4
 COMPILED_CACHE_LOGIC_VERSION = 3
-_AGENT_DEBUG_LOG_PATH = Path(
-    "/Users/ElliotKim/Desktop/Research/kurucz/.cursor/debug-b6f400.log"
-)
-_AGENT_DEBUG_SESSION_ID = "b6f400"
-
-
-def _agent_write_log(
-    *,
-    run_id: str,
-    hypothesis_id: str,
-    location: str,
-    message: str,
-    data: dict[str, object],
-) -> None:
-    if not run_id:
-        return
-    payload = {
-        "sessionId": _AGENT_DEBUG_SESSION_ID,
-        "runId": run_id,
-        "hypothesisId": hypothesis_id,
-        "location": location,
-        "message": message,
-        "data": data,
-        "timestamp": int(time.time() * 1000),
-    }
-    try:
-        with _AGENT_DEBUG_LOG_PATH.open("a", encoding="utf-8") as fp:
-            fp.write(json.dumps(payload, separators=(",", ":")) + "\n")
-    except Exception:
-        return
 
 
 @dataclass(frozen=True)
@@ -417,37 +386,9 @@ def compile_atomic_catalog(
         cache_directory=cache_directory,
     )
     disable_compiled_cache = os.environ.get("PY_DISABLE_COMPILED_CACHE", "0") == "1"
-    agent_run_id = os.environ.get("PY_AGENT_DEBUG_RUN_ID", "")
-    # region agent log
-    _agent_write_log(
-        run_id=agent_run_id,
-        hypothesis_id="H22",
-        location="synthe_py/io/lines/compiler.py:compile_atomic_catalog_entry",
-        message="Compiled cache entry state",
-        data={
-            "cachePath": str(cache_path),
-            "cacheExists": bool(cache_path.exists()),
-            "disableCompiledCache": bool(disable_compiled_cache),
-            "logicVersion": int(COMPILED_CACHE_LOGIC_VERSION),
-        },
-    )
-    # endregion
     if not disable_compiled_cache:
         cached = _compiled_from_cache(cache_path)
         if cached is not None:
-            # region agent log
-            _agent_write_log(
-                run_id=agent_run_id,
-                hypothesis_id="H22",
-                location="synthe_py/io/lines/compiler.py:compile_atomic_catalog_cache_hit",
-                message="Compiled cache hit",
-                data={
-                    "cachePath": str(cache_path),
-                    "catalogRecords": int(len(cached.catalog.records)),
-                    "f19Records": int(cached.fort19_data.wavelength_vacuum.size),
-                },
-            )
-            # endregion
             return cached
 
     disable_parsed_cache = os.environ.get("PY_DISABLE_PARSED_CACHE", "0") == "1"
@@ -574,19 +515,6 @@ def compile_atomic_catalog(
     )
     if not disable_compiled_cache:
         _write_cache(cache_path, compiled)
-        # region agent log
-        _agent_write_log(
-            run_id=agent_run_id,
-            hypothesis_id="H22",
-            location="synthe_py/io/lines/compiler.py:compile_atomic_catalog_cache_write",
-            message="Compiled cache write",
-            data={
-                "cachePath": str(cache_path),
-                "catalogRecords": int(len(compiled.catalog.records)),
-                "f19Records": int(compiled.fort19_data.wavelength_vacuum.size),
-            },
-        )
-        # endregion
     return compiled
 
 

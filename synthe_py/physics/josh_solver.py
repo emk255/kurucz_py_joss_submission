@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-import json
 import os
-import time
 import numpy as np
 
 from numba import jit
@@ -24,98 +22,6 @@ USE_FLOAT32_ITERATION = True
 ITER_TOL = 1.0e-5  # Match Fortran's 1e-5 exactly
 MAX_ITER = NXTAU
 COEFJ_DIAG = np.diag(COEFJ_MATRIX)
-_AGENT_DEBUG_ENABLED = os.getenv("PY_ENABLE_AGENT_DEBUG_LOGS", "0") == "1"
-_AGENT_DEBUG_LOG_PATH = os.getenv(
-    "PY_AGENT_DEBUG_LOG_PATH",
-    "results/validation_100/josh_agent_debug.ndjson",
-)
-_AGENT_DEBUG_SESSION_ID = os.getenv("PY_AGENT_DEBUG_SESSION_ID", "b6f400")
-_AGENT_DEBUG_TARGET_WAVELENGTHS = (
-    422.793236,
-    589.158964,
-    300.184462,
-    357.114647,
-    385.748939,
-    396.261110,
-    347.283083,
-    347.996903,
-    429.094238,
-    318.866884,
-    447.106354,
-    447.275600,
-    447.313561,
-    308.713536,
-    309.432645,
-    380.760320,
-    382.069842,
-    456.911534,
-    587.725130,
-    632.000000,
-    634.466000,
-    636.360933,
-    656.372976,
-    656.593992,
-    366.572686,
-    366.714455,
-    366.872175,
-    367.050763,
-    367.252696,
-    368.039457,
-)
-_AGENT_DEBUG_WAVELENGTH_TOL = 5.0e-2
-
-
-def _agent_extract_wave_nm(debug_label: str) -> float | None:
-    if not debug_label:
-        return None
-    if not (
-        debug_label.startswith("FLUX_TOTAL_") or debug_label.startswith("FLUX_CONT_")
-    ):
-        return None
-    try:
-        return float(debug_label.split("_")[-1])
-    except ValueError:
-        return None
-
-
-def _agent_should_log(debug_label: str) -> tuple[bool, float | None]:
-    if not _AGENT_DEBUG_ENABLED:
-        return False, None
-    wave_nm = _agent_extract_wave_nm(debug_label)
-    if wave_nm is None:
-        return False, None
-    for target in _AGENT_DEBUG_TARGET_WAVELENGTHS:
-        if abs(wave_nm - target) <= _AGENT_DEBUG_WAVELENGTH_TOL:
-            return True, wave_nm
-    return False, wave_nm
-
-
-def _agent_write_log(
-    run_id: str,
-    hypothesis_id: str,
-    location: str,
-    message: str,
-    data: dict,
-) -> None:
-    if not _AGENT_DEBUG_ENABLED or not run_id:
-        return
-    payload = {
-        "sessionId": _AGENT_DEBUG_SESSION_ID,
-        "runId": run_id,
-        "hypothesisId": hypothesis_id,
-        "location": location,
-        "message": message,
-        "data": data,
-        "timestamp": int(time.time() * 1000),
-    }
-    try:
-        with open(_AGENT_DEBUG_LOG_PATH, "a", encoding="utf-8") as fp:
-            fp.write(json.dumps(payload, separators=(",", ":")) + "\n")
-    except Exception:
-        # Debug logs must never affect solver behavior.
-        pass
-
-
 @jit(nopython=True, cache=True)
 def _josh_iteration_kernel(
     coefj_matrix: np.ndarray,
@@ -772,45 +678,6 @@ def solve_josh_flux(
             flush=True,
         )
 
-    agent_log_enabled, agent_wave_nm = _agent_should_log(debug_label)
-    agent_run_id = os.getenv("PY_AGENT_DEBUG_RUN_ID", "pre-fix")
-    if agent_log_enabled:
-        old_sample_idx = np.array([0, 1, 2, 39, 49, 59, 79], dtype=np.int64)
-        old_valid_idx = old_sample_idx[old_sample_idx < abtot.size]
-        acont_sample = [float(acont[idx]) for idx in old_valid_idx]
-        aline_sample = [float(aline[idx]) for idx in old_valid_idx]
-        sigmac_sample = [float(sigmac[idx]) for idx in old_valid_idx]
-        sigmal_sample = [float(sigmal[idx]) for idx in old_valid_idx]
-        abtot_sample = [float(abtot[idx]) for idx in old_valid_idx]
-        rho_sample = [float(rho[idx]) for idx in old_valid_idx]
-        # region agent log
-        _agent_write_log(
-            run_id=agent_run_id,
-            hypothesis_id="H5",
-            location="synthe_py/physics/josh_solver.py:pre_taunu",
-            message="Opacity/source inputs before TAUNU integration",
-            data={
-                "debugLabel": debug_label,
-                "waveNm": float(agent_wave_nm),
-                "acont0": float(acont[0]) if acont.size else 0.0,
-                "aline0": float(aline[0]) if aline.size else 0.0,
-                "sigmac0": float(sigmac[0]) if sigmac.size else 0.0,
-                "sigmal0": float(sigmal[0]) if sigmal.size else 0.0,
-                "scont0": float(scont[0]) if scont.size else 0.0,
-                "sline0": float(sline[0]) if sline.size else 0.0,
-                "snubar0": float(snubar[0]) if snubar.size else 0.0,
-                "alpha0": float(alpha[0]) if alpha.size else 0.0,
-                "oldGridSampleIndices": [int(idx) for idx in old_valid_idx],
-                "acontSample": acont_sample,
-                "alineSample": aline_sample,
-                "sigmacSample": sigmac_sample,
-                "sigmalSample": sigmal_sample,
-                "abtotSample": abtot_sample,
-                "rhoSample": rho_sample,
-            },
-        )
-        # endregion
-
     # Extract wavelength from debug_label if present (format: FLUX_TOTAL_300.00040572)
     # This must be done early so wavelength_nm is available for conditional debug blocks below
     wavelength_nm = None
@@ -864,29 +731,6 @@ def solve_josh_flux(
             start = abtot[0] * rho_integ[0] if rho_integ.size else 0.0
             start_surface_first = start
             start_surface_last = start
-        if agent_log_enabled:
-            # region agent log
-            _agent_write_log(
-                run_id=agent_run_id,
-                hypothesis_id="H64",
-                location="synthe_py/physics/josh_solver.py:taunu_start_mode",
-                message="TAUNU start term mode for INTEG",
-                data={
-                    "debugLabel": debug_label,
-                    "waveNm": float(agent_wave_nm),
-                    "needsReverse": bool(needs_reverse),
-                    "rho0Input": float(rho[0]) if rho.size else 0.0,
-                    "rhoLastInput": float(rho[-1]) if rho.size else 0.0,
-                    "rho0Integ": float(rho_integ[0]) if rho_integ.size else 0.0,
-                    "rhoLastInteg": float(rho_integ[-1]) if rho_integ.size else 0.0,
-                    "abtot0Integ": float(abtot_integ[0]) if abtot_integ.size else 0.0,
-                    "abtotLastInteg": float(abtot_integ[-1]) if abtot_integ.size else 0.0,
-                    "startSurfaceFirst": float(start_surface_first),
-                    "startSurfaceLast": float(start_surface_last),
-                    "startUsed": float(start),
-                },
-            )
-            # endregion
         if debug:
             print(
                 f"DEBUG: After needs_reverse setup, rho_integ.size={rho_integ.size}, start={start:.8E}",
@@ -1238,34 +1082,6 @@ def solve_josh_flux(
     # is non-negligible scattering.
     needs_iteration = np.any(alpha > 1e-12)
 
-    if agent_log_enabled and taunu.size > 0:
-        old_sample_idx = np.array([0, 1, 2, 39, 49, 59, 79], dtype=np.int64)
-        old_valid_idx = old_sample_idx[old_sample_idx < taunu.size]
-        taunu_sample = [float(taunu[idx]) for idx in old_valid_idx]
-        snubar_sample = [float(snubar[idx]) for idx in old_valid_idx]
-        alpha_sample = [float(alpha[idx]) for idx in old_valid_idx]
-        # region agent log
-        _agent_write_log(
-            run_id=agent_run_id,
-            hypothesis_id="H2",
-            location="synthe_py/physics/josh_solver.py:post_taunu",
-            message="TAUNU integration outcome before MAXJ decision",
-            data={
-                "debugLabel": debug_label,
-                "waveNm": float(agent_wave_nm),
-                "taunu0": float(taunu[0]),
-                "taunuLast": float(taunu[-1]),
-                "xtauMax": float(XTAU_GRID[-1]),
-                "needsIteration": bool(needs_iteration),
-                "surfaceGtTauGridMax": bool(taunu[0] > XTAU_GRID[-1]),
-                "oldGridSampleIndices": [int(idx) for idx in old_valid_idx],
-                "taunuSample": taunu_sample,
-                "snubarSample": snubar_sample,
-                "alphaSample": alpha_sample,
-            },
-        )
-        # endregion
-
     # CRITICAL: Always use scattering path (XSBAR/XALPHA) even for continuum-only
     # This matches Fortran's IFSCAT=1 behavior
     always_use_scattering_path = True
@@ -1353,24 +1169,6 @@ def solve_josh_flux(
         maxj_force_401 = bool(taunu.size > 0 and taunu[0] > XTAU_GRID[-1])
         maxj = 1 if maxj_force_401 else 0
 
-        if agent_log_enabled:
-            # region agent log
-            _agent_write_log(
-                run_id=agent_run_id,
-                hypothesis_id="H1",
-                location="synthe_py/physics/josh_solver.py:maxj_gate",
-                message="MAXJ pre-MAP1 gate result",
-                data={
-                    "debugLabel": debug_label,
-                    "waveNm": float(agent_wave_nm),
-                    "maxjPreMap1": int(1 if maxj_force_401 else 0),
-                    "taunu0": float(taunu[0]) if taunu.size else 0.0,
-                    "xtauMax": float(XTAU_GRID[-1]),
-                    "alwaysUseScatteringPath": bool(always_use_scattering_path),
-                },
-            )
-            # endregion
-
         # CRITICAL FIX: When MAXJ=1, Fortran skips MAP1 interpolation (line 8269: GO TO 401)
         # Instead, it sets XSBAR and XALPHA directly from SNUBAR[0] and ALPHA[0]
         # (see lines 8295-8299: when XTAU8(L) < TAUNU(1), set XSBAR(L)=SNUBAR(1))
@@ -1408,30 +1206,6 @@ def solve_josh_flux(
                 debug=debug,
             )
             xalpha, maxj_xalpha = _map1(taunu, alpha, XTAU_GRID, debug=debug)
-            if agent_log_enabled:
-                map_sample_idx = np.array([0, 1, 2, 9, 19, 39, 49, 50], dtype=np.int64)
-                map_valid_idx = map_sample_idx[map_sample_idx < xsbar.size]
-                xsbar_raw_sample = [float(xsbar[idx]) for idx in map_valid_idx]
-                xalpha_raw_sample = [float(xalpha[idx]) for idx in map_valid_idx]
-                # region agent log
-                _agent_write_log(
-                    run_id=agent_run_id,
-                    hypothesis_id="H6",
-                    location="synthe_py/physics/josh_solver.py:post_map1_pre_mask",
-                    message="MAP1 outputs before surface masking",
-                    data={
-                        "debugLabel": debug_label,
-                        "waveNm": float(agent_wave_nm),
-                        "maxjFromMapSnubar": int(maxj_xsbar),
-                        "maxjFromMapAlpha": int(maxj_xalpha),
-                        "mapSampleIndices": [int(idx) for idx in map_valid_idx],
-                        "xsbarRawSample": xsbar_raw_sample,
-                        "xalphaRawSample": xalpha_raw_sample,
-                        "taunu0": float(taunu[0]) if taunu.size else 0.0,
-                        "taunuLast": float(taunu[-1]) if taunu.size else 0.0,
-                    },
-                )
-                # endregion
             # CRITICAL DEBUG: Check XSBAR after MAP1, BEFORE mask
             if debug:
                 print(f"\nDEBUG: After MAP1, BEFORE mask:")
@@ -1505,39 +1279,6 @@ def solve_josh_flux(
         # Note: XS is initialized from UNMODIFIED XSBAR, but xsbar_modified is
         # used in the iteration formula. This matches Fortran's behavior.
         xsbar_modified = xsbar * (1.0 - xalpha)
-
-        if agent_log_enabled:
-            mask_count = int(np.sum(XTAU_GRID < taunu[0])) if taunu.size > 0 else 0
-            sample_idx = np.array([0, 1, 2, 9, 19, 39, 49, 50], dtype=np.int64)
-            valid_idx = sample_idx[sample_idx < xs.size]
-            xs_init_sample = [float(xs[idx]) for idx in valid_idx]
-            xalpha_sample = [float(xalpha[idx]) for idx in valid_idx]
-            xsbar_mod_sample = [float(xsbar_modified[idx]) for idx in valid_idx]
-            # region agent log
-            _agent_write_log(
-                run_id=agent_run_id,
-                hypothesis_id="H3",
-                location="synthe_py/physics/josh_solver.py:post_mask",
-                message="XS/XSBAR state after mask and (1-alpha) transform",
-                data={
-                    "debugLabel": debug_label,
-                    "waveNm": float(agent_wave_nm),
-                    "maxj": int(maxj),
-                    "maskCount": int(mask_count),
-                    "xs0Init": float(xs[0]) if xs.size else 0.0,
-                    "xsLastInit": float(xs[-1]) if xs.size else 0.0,
-                    "xsbar0": float(xsbar[0]) if xsbar.size else 0.0,
-                    "xalpha0": float(xalpha[0]) if xalpha.size else 0.0,
-                    "xsbarModified0": float(xsbar_modified[0])
-                    if xsbar_modified.size
-                    else 0.0,
-                    "sampleIndices": [int(idx) for idx in valid_idx],
-                    "xsInitSample": xs_init_sample,
-                    "xalphaSample": xalpha_sample,
-                    "xsbarModifiedSample": xsbar_mod_sample,
-                },
-            )
-            # endregion
 
         # CRITICAL DEBUG: Check xsbar_modified after modification
         if debug:
@@ -1776,68 +1517,6 @@ def solve_josh_flux(
         xs = xsbar.copy()
         num_iterations = 0  # No iteration for this path
 
-    if agent_log_enabled:
-        sample_idx = np.array([0, 1, 2, 9, 19, 39, 49, 50], dtype=np.int64)
-        valid_idx = sample_idx[sample_idx < xs.size]
-        xs_final_sample = [float(xs[idx]) for idx in valid_idx]
-        # region agent log
-        _agent_write_log(
-            run_id=agent_run_id,
-            hypothesis_id="H1",
-            location="synthe_py/physics/josh_solver.py:post_iteration",
-            message="Iteration execution status",
-            data={
-                "debugLabel": debug_label,
-                "waveNm": float(agent_wave_nm),
-                "maxj": int(maxj),
-                "maxjFromMapSnubar": int(maxj_xsbar),
-                "maxjFromMapAlpha": int(maxj_xalpha),
-                "iterationExecuted": bool(num_iterations > 0),
-                "numIterations": int(num_iterations),
-                "xs0Final": float(xs[0]) if xs.size else 0.0,
-                "xsLastFinal": float(xs[-1]) if xs.size else 0.0,
-                "sampleIndices": [int(idx) for idx in valid_idx],
-                "xsFinalSample": xs_final_sample,
-                "taunu0Final": float(taunu[0]) if taunu.size else 0.0,
-                "taunu1Final": float(taunu[1]) if taunu.size > 1 else 0.0,
-                "taunu2Final": float(taunu[2]) if taunu.size > 2 else 0.0,
-                "xtau0": float(XTAU_GRID[0]) if XTAU_GRID.size else 0.0,
-                "xtau1": float(XTAU_GRID[1]) if XTAU_GRID.size > 1 else 0.0,
-                "xtauMax": float(XTAU_GRID[-1]) if XTAU_GRID.size else 0.0,
-            },
-        )
-        # endregion
-        if int(maxj) == 1 and flux_override is not None:
-            # region agent log
-            _agent_write_log(
-                run_id=agent_run_id,
-                hypothesis_id="H12",
-                location="synthe_py/physics/josh_solver.py:maxj401_surface",
-                message="MAXJ=1 surface flux via Fortran-401 profile solve",
-                data={
-                    "debugLabel": debug_label,
-                    "waveNm": float(agent_wave_nm),
-                    "numIterations": int(num_iterations),
-                    "errorSum": float(maxj401_error),
-                    "taunu0": float(taunu[0]) if taunu.size else 0.0,
-                    "taunu1": float(taunu[1]) if taunu.size > 1 else 0.0,
-                    "taunu2": float(taunu[2]) if taunu.size > 2 else 0.0,
-                    "taunuLast": float(taunu[-1]) if taunu.size else 0.0,
-                    "snubar0": float(snubar[0]) if snubar.size else 0.0,
-                    "snubarLast": float(snubar[-1]) if snubar.size else 0.0,
-                    "alpha0": float(alpha[0]) if alpha.size else 0.0,
-                    "alphaLast": float(alpha[-1]) if alpha.size else 0.0,
-                    "hnu0Raw": float(hnu_profile[0]) if hnu_profile.size else 0.0,
-                    "hnu1Raw": float(hnu_profile[1]) if hnu_profile.size > 1 else 0.0,
-                    "jmins0Raw": float(jmins_profile[0]) if jmins_profile.size else 0.0,
-                    "jnu0Raw": float(jnu_profile[0]) if jnu_profile.size else 0.0,
-                    "fluxHnuSurface": float(flux_override),
-                    "fluxKnuJnuOver3": float(flux_ck_override),
-                    "fluxHnuSurfaceRaw": float(flux_hnu_surface),
-                    "fluxKnuSurfaceRaw": float(flux_knu_surface),
-                },
-            )
-            # endregion
     if debug:
         print(f"\nAfter _map1 (before mask correction):")
         print(f"  TAUNU[0] = {taunu[0] if taunu.size > 0 else 0:.8E}")
@@ -2064,25 +1743,6 @@ def solve_josh_flux(
     else:
         flux = float(np.dot(flux_weights, xs))
         flux_ck = float(np.dot(np.asarray(CK_WEIGHTS, dtype=xs.dtype), xs))
-
-    if agent_log_enabled:
-        # region agent log
-        _agent_write_log(
-            run_id=agent_run_id,
-            hypothesis_id="H4",
-            location="synthe_py/physics/josh_solver.py:flux_exit",
-            message="Flux outputs for CH vs CK weights",
-            data={
-                "debugLabel": debug_label,
-                "waveNm": float(agent_wave_nm),
-                "maxj": int(maxj),
-                "fluxCH": float(flux),
-                "fluxCK": float(flux_ck),
-                "weightsSumCH": float(np.sum(flux_weights)),
-                "weightsSumCK": float(np.sum(CK_WEIGHTS)),
-            },
-        )
-        # endregion
 
     # Also print flux result immediately
     if debug:

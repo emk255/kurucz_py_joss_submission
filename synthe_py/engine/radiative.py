@@ -2,10 +2,8 @@
 
 from __future__ import annotations
 
-import json
 import logging
 import os
-import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Optional, Tuple
 
@@ -20,60 +18,6 @@ _K_BOLTZ = 1.380649e-16  # erg / K
 _RT_DEBUG_ENABLED = os.getenv("PY_ENABLE_RT_DEBUG", "0") == "1"
 _RT_AUTO_DEBUG_ENABLED = os.getenv("PY_ENABLE_RT_AUTO_DEBUG", "0") == "1"
 _RT_FAILURE_DEBUG_ENABLED = os.getenv("PY_ENABLE_RT_FAILURE_DEBUG", "0") == "1"
-_AGENT_DEBUG_ENABLED = os.getenv("PY_ENABLE_AGENT_DEBUG_LOGS", "0") == "1"
-_AGENT_DEBUG_LOG_PATH = os.getenv(
-    "PY_AGENT_DEBUG_LOG_PATH",
-    "results/validation_100/radiative_agent_debug.ndjson",
-)
-_AGENT_DEBUG_SESSION_ID = "b6f400"
-_AGENT_DEBUG_TARGET_WAVES = (
-    422.79323578,
-    589.15896422,
-    300.18446200,
-    400.00000000,
-    318.86688440,
-    447.10635430,
-    447.27559960,
-    447.31356123,
-    308.71353613,
-    309.43264466,
-    380.76032024,
-    382.06984188,
-    456.91153400,
-    587.72513000,
-    632.00000000,
-    634.46600000,
-    636.36093300,
-)
-_AGENT_DEBUG_WAVE_TOL = 5.0e-2
-
-
-def _agent_write_log(
-    run_id: str,
-    hypothesis_id: str,
-    location: str,
-    message: str,
-    data: dict,
-) -> None:
-    if not _AGENT_DEBUG_ENABLED or not run_id:
-        return
-    payload = {
-        "sessionId": _AGENT_DEBUG_SESSION_ID,
-        "runId": run_id,
-        "hypothesisId": hypothesis_id,
-        "location": location,
-        "message": message,
-        "data": data,
-        "timestamp": int(time.time() * 1000),
-    }
-    try:
-        with open(_AGENT_DEBUG_LOG_PATH, "a", encoding="utf-8") as fp:
-            fp.write(json.dumps(payload, separators=(",", ":")) + "\n")
-    except Exception:
-        # Debug logging must not affect solver behavior.
-        pass
-
-
 def _planck_nu(freq: float, temperature: np.ndarray) -> np.ndarray:
     """Compute Planck function B_nu(T) using Fortran's exact formula.
 
@@ -505,129 +449,6 @@ def solve_lte_frequency(
         debug_label=f"FLUX_TOTAL_{wavelength_nm:.8f}",
         temperature=temp,  # Pass temperature for debug output
     )
-
-    # Counterfactual source test (read-only): evaluate whether forcing SLINE≈0
-    # would move the output toward Fortran at known problematic wavelengths.
-    agent_run_id = os.getenv("PY_AGENT_DEBUG_RUN_ID", "")
-    if _AGENT_DEBUG_ENABLED and agent_run_id and any(
-        abs(wavelength_nm - w) <= _AGENT_DEBUG_WAVE_TOL for w in _AGENT_DEBUG_TARGET_WAVES
-    ):
-        try:
-            flux_total_zero_src = solve_josh_flux(
-                cont_a,
-                planck,
-                line_a,
-                np.zeros_like(line_src),
-                cont_s,
-                line_sig,
-                mass,
-                debug=False,
-                debug_label=f"ALT_ZERO_SRC_{wavelength_nm:.8f}",
-                temperature=temp,
-            )
-        except Exception:
-            flux_total_zero_src = float("nan")
-        try:
-            flux_total_line2x = solve_josh_flux(
-                cont_a,
-                planck,
-                2.0 * line_a,
-                line_src,
-                cont_s,
-                line_sig,
-                mass,
-                debug=False,
-                debug_label=f"ALT_LINE2X_{wavelength_nm:.8f}",
-                temperature=temp,
-            )
-        except Exception:
-            flux_total_line2x = float("nan")
-        try:
-            flux_total_line5x = solve_josh_flux(
-                cont_a,
-                planck,
-                5.0 * line_a,
-                line_src,
-                cont_s,
-                line_sig,
-                mass,
-                debug=False,
-                debug_label=f"ALT_LINE5X_{wavelength_nm:.8f}",
-                temperature=temp,
-            )
-        except Exception:
-            flux_total_line5x = float("nan")
-        try:
-            flux_total_line100x = solve_josh_flux(
-                cont_a,
-                planck,
-                100.0 * line_a,
-                line_src,
-                cont_s,
-                line_sig,
-                mass,
-                debug=False,
-                debug_label=f"ALT_LINE100X_{wavelength_nm:.8f}",
-                temperature=temp,
-            )
-        except Exception:
-            flux_total_line100x = float("nan")
-        # region agent log
-        _agent_write_log(
-            run_id=agent_run_id,
-            hypothesis_id="H11",
-            location="synthe_py/engine/radiative.py:alt_zero_source",
-            message="Current line source vs zero-source counterfactual",
-            data={
-                "wavelengthNm": float(wavelength_nm),
-                "fluxTotalCurrentHz": float(flux_total),
-                "fluxTotalZeroSrcHz": float(flux_total_zero_src),
-                "fluxTotalLine2xHz": float(flux_total_line2x),
-                "fluxTotalLine5xHz": float(flux_total_line5x),
-                "fluxTotalLine100xHz": float(flux_total_line100x),
-                "fluxContHz": float(flux_cont),
-                "lineOpacitySurface": float(line_a[0]) if line_a.size > 0 else 0.0,
-                "lineSourceSurface": float(line_src[0]) if line_src.size > 0 else 0.0,
-                "contAbsSurface": float(cont_a[0]) if cont_a.size > 0 else 0.0,
-                "contScatSurface": float(cont_s[0]) if cont_s.size > 0 else 0.0,
-                "lineScatSurface": float(line_sig[0]) if line_sig.size > 0 else 0.0,
-                "surfaceScatteringFraction": (
-                    float(
-                        (cont_s[0] + line_sig[0])
-                        / max(cont_a[0] + line_a[0] + cont_s[0] + line_sig[0], 1e-40)
-                    )
-                    if (
-                        cont_a.size > 0
-                        and line_a.size > 0
-                        and cont_s.size > 0
-                        and line_sig.size > 0
-                    )
-                    else 0.0
-                ),
-                "contAbsMean": float(np.mean(cont_a)) if cont_a.size > 0 else 0.0,
-                "contScatMean": float(np.mean(cont_s)) if cont_s.size > 0 else 0.0,
-                "lineOpacityMean": float(np.mean(line_a)) if line_a.size > 0 else 0.0,
-                "lineScatMean": float(np.mean(line_sig)) if line_sig.size > 0 else 0.0,
-                "lineSourceMean": float(np.mean(line_src)) if line_src.size > 0 else 0.0,
-            },
-        )
-        # endregion
-        # region agent log
-        _agent_write_log(
-            run_id=agent_run_id,
-            hypothesis_id="H14",
-            location="synthe_py/engine/radiative.py:alt_line_opacity_scale",
-            message="Counterfactual line-opacity scaling impact",
-            data={
-                "wavelengthNm": float(wavelength_nm),
-                "fluxTotalCurrentHz": float(flux_total),
-                "fluxTotalLine2xHz": float(flux_total_line2x),
-                "fluxTotalLine5xHz": float(flux_total_line5x),
-                "fluxTotalLine100xHz": float(flux_total_line100x),
-                "lineOpacitySurface": float(line_a[0]) if line_a.size > 0 else 0.0,
-            },
-        )
-        # endregion
 
     # CRITICAL DEBUG: Check if flux_total is zero
     # Check for exactly zero OR very small values
