@@ -1,3 +1,7 @@
 # Output directories
 results/
 logs/
+
+# Line cache (large, regenerated on first run)
+synthe_py/out/
+synthe_py/out
