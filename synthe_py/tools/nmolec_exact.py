@@ -1647,7 +1647,7 @@ _TRACE_SOLVIT_MATRIX = os.environ.get("NM_TRACE_SOLVIT_MATRIX", "").strip().lowe
 
 
 def _append_debug_line(filename: str, line: str) -> None:
-    if not line:
+    if not line or "nmolec_debug_python" in filename:
         return
     log_path = Path(os.getcwd()) / filename
     try:
@@ -1658,7 +1658,7 @@ def _append_debug_line(filename: str, line: str) -> None:
 
 
 def _append_nmolec_log(line: str) -> None:
-    _append_debug_line("logs/nmolec_debug_python.log", line)
+    pass  # Debug logging disabled
 
 
 def _log_equilj_event(
@@ -1669,17 +1669,7 @@ def _log_equilj_event(
     molecule_code: float,
     equilj_value: float,
 ) -> None:
-    _append_debug_line(
-        "logs/nmolec_debug_python.log",
-        "PY_EQUILJ layer={layer:3d} iter={iter:3d} jm={jm:4d} "
-        "code={code:8.3f} equilj={equilj:.17E}".format(
-            layer=layer_idx + 1,
-            iter=iteration + 1,
-            jm=molecule_index + 1,
-            code=molecule_code,
-            equilj=equilj_value,
-        ),
-    )
+    pass  # nmolec_debug_python.log disabled
 
 
 def _should_trace_pfsa(j_layer: int, jmol_index: int) -> bool:
@@ -2374,24 +2364,6 @@ def _accumulate_molecules_atlas7(
             term = np.exp(log_term)
 
         if (
-            _TERM_TRACE_THRESHOLD is not None
-            and np.isfinite(term)
-            and abs(term) > _TERM_TRACE_THRESHOLD
-        ):
-            debug_log_path = os.path.join(os.getcwd(), "logs/nmolec_debug_python.log")
-            with open(debug_log_path, "a") as f:
-                f.write(
-                    "PY_TERM_TRACE layer={layer} iter={iter} mol={mol} "
-                    "code={code:.2f} term={term:.17E}\n".format(
-                        layer=layer_index + 1,
-                        iter=iteration + 1,
-                        mol=jmol + 1,
-                        code=code_mol[jmol],
-                        term=term,
-                    )
-                )
-
-        if (
             _TRACE_DEQ_COLS
             and (iteration + 1) in _TRACE_ITERATIONS
             and (layer_index + 1) == 1
@@ -2488,29 +2460,6 @@ def _accumulate_molecules_atlas7(
             if not np.isfinite(d):
                 continue
 
-            if (
-                _DEQ_TRACE_THRESHOLD is not None
-                and abs(d) > _DEQ_TRACE_THRESHOLD
-                and (not _TRACE_DEQ_COLS or k_idx in _TRACE_DEQ_COLS)
-            ):
-                debug_log_path = os.path.join(
-                    os.getcwd(), "logs/nmolec_debug_python.log"
-                )
-                with open(debug_log_path, "a") as f:
-                    f.write(
-                        "PY_DEQ_TERM layer={layer} iter={iter} mol={mol} "
-                        "col={col} row={row} term={term:.17E} xn={xn:.17E} d={d:.17E}\n".format(
-                            layer=layer_index + 1,
-                            iter=iteration + 1,
-                            mol=jmol + 1,
-                            col=k_idx + 1,
-                            row=k_idx + 1,
-                            term=term,
-                            xn=xn[k_idx],
-                            d=d,
-                        )
-                    )
-
             if nonfinite_callback is not None and not np.isfinite(d):
                 nonfinite_callback(
                     stage="delta",
@@ -2588,25 +2537,6 @@ def _accumulate_molecules_atlas7(
                 )
             nequak = nequa * k_idx
             prev_col_val = deq[nequak]
-            if (
-                _DEQ_TRACE_THRESHOLD is not None
-                and abs(prev_col_val) > _DEQ_TRACE_THRESHOLD
-                and (not _TRACE_DEQ_COLS or k_idx in _TRACE_DEQ_COLS)
-            ):
-                debug_log_path = os.path.join(
-                    os.getcwd(), "logs/nmolec_debug_python.log"
-                )
-                with open(debug_log_path, "a") as f:
-                    f.write(
-                        "PY_DEQ_COL_PRE layer={layer} iter={iter} mol={mol} "
-                        "col={col} value={val:.17E}\n".format(
-                            layer=layer_index + 1,
-                            iter=iteration + 1,
-                            mol=jmol + 1,
-                            col=k_idx + 1,
-                            val=prev_col_val,
-                        )
-                    )
             new_col_val = np.float64(prev_col_val + d)
             if trace_electron_contrib and k_idx == nequa - 1:
                 _log_electron_event(
@@ -2641,26 +2571,6 @@ def _accumulate_molecules_atlas7(
                 m_idx = nequa - 1 if m_raw == nequa else m_raw
                 mk = m_idx + nequak
                 prev_val = deq[mk]
-                if (
-                    _DEQ_TRACE_THRESHOLD is not None
-                    and abs(prev_val) > _DEQ_TRACE_THRESHOLD
-                    and (not _TRACE_DEQ_COLS or k_idx in _TRACE_DEQ_COLS)
-                ):
-                    debug_log_path = os.path.join(
-                        os.getcwd(), "logs/nmolec_debug_python.log"
-                    )
-                    with open(debug_log_path, "a") as f:
-                        f.write(
-                            "PY_DEQ_ENTRY_PRE layer={layer} iter={iter} mol={mol} "
-                            "row={row} col={col} value={val:.17E}\n".format(
-                                layer=layer_index + 1,
-                                iter=iteration + 1,
-                                mol=jmol + 1,
-                                row=m_idx + 1,
-                                col=k_idx + 1,
-                                val=prev_val,
-                            )
-                        )
                 new_val = np.float64(prev_val + d)
                 if trace_electron_contrib and (
                     m_idx == nequa - 1 or k_idx == nequa - 1
@@ -3072,24 +2982,6 @@ def _trace_deq_update(
                 continue
             entries.append(f"DEQ({row_idx+1},{m+1})={deq[idx]: .17E}")
 
-    debug_log_path = os.path.join(os.getcwd(), "logs/nmolec_debug_python.log")
-    call_str = f"{call_idx:3d}" if call_idx is not None else "N/A"
-    with open(debug_log_path, "a") as f:
-        f.write(
-            "PY_DEQ_TRACK layer={layer:3d} iter={iter:3d} call={call} "
-            "mol={mol:3d} code={code:8.2f} k={k:3d} d={d: .17E}\n".format(
-                layer=layer,
-                iter=iteration,
-                call=call_str,
-                mol=molecule_index,
-                code=molecule_code,
-                k=m + 1,
-                d=d,
-            )
-        )
-        for entry in entries:
-            f.write(f"    {entry}\n")
-
 
 def _set_solvit_context(layer: int, iteration: int, call_idx: int | None) -> None:
     global _current_solvit_layer, _current_solvit_iter, _current_solvit_call
@@ -3318,22 +3210,6 @@ def nmolec_exact(
                     if iteration > 0 and x_contrib < 1e-5 * xne_j:
                         mask[i] = 0
 
-            if debug_xne_iter and iteration == 0:
-                debug_log_path = os.path.join(
-                    os.getcwd(), "logs/nmolec_debug_python.log"
-                )
-                with open(debug_log_path, "a") as f:
-                    f.write(f"PY_XNE_ITER: Layer {j_layer} iteration {iteration}:\n")
-                    f.write(f"  XNATOM={xnatom_j:.6e}, XNE_old={xne_j:.6e}\n")
-                    for iz, elec, contrib in contributions:
-                        if isinstance(elec, str):
-                            f.write(f"  Z={iz:2d}: ERROR - {contrib}\n")
-                        else:
-                            f.write(
-                                f"  Z={iz:2d}: elec/atom={elec:.6e}, contrib={contrib:.6e}\n"
-                            )
-                    f.write(f"  XNE_new (before damp)={xne_new:.6e}\n")
-
             if debug_xne_iter:
                 debug_log_path = os.path.join(os.getcwd(), "logs/nmolec_xne_iter.log")
                 with open(debug_log_path, "a") as f:
@@ -3385,11 +3261,6 @@ def nmolec_exact(
         """Log the full EQ vector for early iterations (mirrors Fortran debug)."""
         if vec is None:
             return
-        debug_log_path = os.path.join(os.getcwd(), "logs/nmolec_debug_python.log")
-        with open(debug_log_path, "a") as f:
-            f.write(f"PY_NMOLEC: {stage_header} (ITER={iteration_idx}):\n")
-            for kk in range(nequa):
-                f.write(f"  {entry_label}({kk+1:2d})={vec[kk]: .17E}\n")
 
     def _log_tracked_deq_columns(
         layer_idx: int,
@@ -3401,39 +3272,6 @@ def nmolec_exact(
         """Log selected DEQ columns (1,8,9,10,16) before SOLVIT for comparison with Fortran."""
         if deq_matrix is None or eq_vec is None:
             return
-        debug_log_path = os.path.join(os.getcwd(), "logs/nmolec_debug_python.log")
-        with open(debug_log_path, "a") as f:
-            call_part = (
-                f" CALL={call_idx:3d}" if call_idx is not None and call_idx >= 0 else ""
-            )
-            f.write(
-                f"PY_NMOLEC: Selected DEQ columns before SOLVIT (LAYER={layer_idx+1:3d} ITER={iteration_idx:3d}{call_part})\n"
-            )
-            for col_idx in tracked_deq_columns:
-                if (
-                    col_idx >= deq_matrix.shape[1]
-                    or col_idx >= deq_matrix.shape[0]
-                    or col_idx >= eq_vec.shape[0]
-                ):
-                    continue
-                f.write(
-                    f"  Column {col_idx+1:2d} values (EQ={eq_vec[col_idx]: .17E}):\n"
-                )
-                for row_idx in range(deq_matrix.shape[0]):
-                    f.write(
-                        f"    Row {row_idx+1:2d} -> {deq_matrix[row_idx, col_idx]: .17E}\n"
-                    )
-            if deq_matrix.shape[0] > 8 and deq_matrix.shape[1] > 1:
-                a9_2_value = deq_matrix[8, 1]
-                call_str = (
-                    f" call={call_idx:3d}"
-                    if call_idx is not None and call_idx >= 0
-                    else ""
-                )
-                f.write(
-                    f"PY_DEQ_A9_2 iter={iteration_idx:3d} layer={layer_idx+1:3d}{call_str}: value={a9_2_value: .17E}\n"
-                )
-            f.write("\n")
 
     def _log_xn_seed(
         layer_idx: int,
@@ -3568,12 +3406,6 @@ def nmolec_exact(
             electron_density[j] = base_x
             xne_seed[j] = base_x
             x_prev_seeded = True
-            debug_log_path = os.path.join(os.getcwd(), "logs/nmolec_debug_python.log")
-            with open(debug_log_path, "a") as f:
-                f.write(
-                    f"PY_NMOLEC: Layer {j} seed: XNTOT={xntot:.17E} "
-                    f"XN[0]={xn[0]:.17E} BASE_X={base_x:.17E}\n"
-                )
         else:
             # Subsequent layers: use previous layer's solution as initial guess
             # For continuation: prev_layer_idx is the previous iteration's layer (hotter)
@@ -3878,48 +3710,9 @@ def nmolec_exact(
                                 equilj[jmol] = (
                                     fracn / frac0 * (electron_density[j] ** ion)
                                 )
-                        if log_pfsaha:
-                            debug_log_path = os.path.join(
-                                os.getcwd(), "logs/nmolec_debug_python.log"
-                            )
-                            with open(debug_log_path, "a") as f:
-                                f.write(
-                                    "PY_PFSAHA: jm={jm:4d} code={code:8.2f} "
-                                    "ncomp={ncomp:2d} ion={ion:2d} "
-                                    "frac0={frac0: .17E} fracN={fracn: .17E} "
-                                    "xne={xne: .17E}\n".format(
-                                        jm=jmol + 1,
-                                        code=code_mol[jmol],
-                                        ncomp=ncomp,
-                                        ion=ion,
-                                        frac0=frac[j, 0],
-                                        fracn=frac[j, ncomp - 1],
-                                        xne=electron_density[j],
-                                    )
-                                )
-                                f.write(
-                                    "PY_PFSAHA_EQ: jm={jm:4d} code={code:8.2f} "
-                                    "equilj={eq: .17E}\n".format(
-                                        jm=jmol + 1,
-                                        code=code_mol[jmol],
-                                        eq=equilj[jmol],
-                                    )
-                                )
                         # CRITICAL: Do NOT check for NaN/Inf - Fortran doesn't check either!
                         # Fortran allows INF/NaN EQUILJ to propagate through TERM calculation
 
-                        # DEBUG: Print EQUILJ after PFSAHA calculation for molecule 2, 11, and 26
-                        if j == 0 and (jmol in {1, 6, 10, 25, 70, 72}):
-                            debug_log_path = os.path.join(
-                                os.getcwd(), "logs/nmolec_debug_python.log"
-                            )
-                            with open(debug_log_path, "a") as f:
-                                f.write(
-                                    f"PY_NMOLEC: Molecule {jmol+1} CODE={code_mol[jmol]:.2f} PFSAHA: "
-                                    f"ID={id_elem} NCOMP={ncomp} ION={ion} "
-                                    f"FRAC(j,0)={frac[j, 0]:.17E} FRAC(j,ncomp-1)={frac[j, ncomp-1]:.17E} "
-                                    f"XNE={electron_density[j]:.17E} EQUILJ={equilj[jmol]:.17E}\n"
-                                )
                         # CRITICAL FIX: Do NOT apply CPFC corrections in PFSAHA path!
                         # Fortran does NOT apply CPFC corrections to PFSAHA molecules (lines 4544-4554
                         # are BEFORE label 35, so they're only in polynomial path)
@@ -4004,24 +3797,6 @@ def nmolec_exact(
                         182,
                         184,
                     } | TRACE_MOLECULES_FORCE
-                    if j == 0 and jmol in debug_molecules:
-                        debug_log_path = os.path.join(
-                            os.getcwd(), "logs/nmolec_debug_python.log"
-                        )
-                        with open(debug_log_path, "a") as f:
-                            f.write(
-                                f"PY_NMOLEC: EQUIL coeffs: JMOL={jmol+1} CODE={code_mol[jmol]:.2f} "
-                                f"NCOMP={ncomp} ION={ion}\n"
-                            )
-                            f.write(
-                                f"  EQUIL(1-7)={equil[0,jmol]:.4e} {equil[1,jmol]:.4e} "
-                                f"{equil[2,jmol]:.4e} {equil[3,jmol]:.4e} "
-                                f"{equil[4,jmol]:.4e} {equil[5,jmol]:.4e} {equil[6,jmol]:.4e}\n"
-                            )
-                            f.write(
-                                f"PY_NMOLEC: Temp values: T={temperature[j]:.4e} "
-                                f"TKEV={tkev[j]:.4e} TLOG={tlog[j]:.4e}\n"
-                            )
 
                     # Calculate polynomial step-by-step for debugging
                     # CRITICAL: Match Fortran's polynomial calculation exactly (lines 4552-4555):
@@ -4060,49 +3835,11 @@ def nmolec_exact(
                     )
                     exp_arg_poly = np.float64(poly_term) + tlog_term
 
-                    # DEBUG: Log polynomial calculation for molecules 162, 167-185
-                    if j == 0 and jmol in debug_molecules:
-                        debug_log_path = os.path.join(
-                            os.getcwd(), "logs/nmolec_debug_python.log"
-                        )
-                        with open(debug_log_path, "a") as f:
-                            f.write(
-                                f"PY_NMOLEC: Poly calc: POLY_TERM={poly_term:.4e} "
-                                f"TLOG_TERM={tlog_term:.4e} EXP_ARG={exp_arg_poly:.4e}\n"
-                            )
-
                     # Fortran does NOT clamp exp() arguments - it allows inf/nan
                     # Match Fortran behavior exactly: use exp() directly
                     # CRITICAL: Ensure exp_arg_poly is np.float64 for double precision
                     equilj_before_exp = equilj[jmol]
                     equilj[jmol] = np.exp(np.float64(exp_arg_poly))
-
-                    # DEBUG: Log EQUILJ after exp() for molecules 167-185 (all iterations)
-                    if j == 0 and jmol in debug_molecules:
-                        # Get current iteration number (need to pass it or detect it)
-                        # For now, log all iterations
-                        debug_log_path = os.path.join(
-                            os.getcwd(), "logs/nmolec_debug_python.log"
-                        )
-                        with open(debug_log_path, "a") as f:
-                            if np.isinf(equilj[jmol]):
-                                f.write(
-                                    f"PY_NMOLEC: Molecule {jmol+1} CODE={code_mol[jmol]:.2f} "
-                                    f"EQUILJ=INF (exp_arg={exp_arg_poly:.4e}, "
-                                    f"T={temperature[j]:.4e}, TKEV={tkev[j]:.4e})\n"
-                                )
-                            elif np.isnan(equilj[jmol]):
-                                f.write(
-                                    f"PY_NMOLEC: Molecule {jmol+1} CODE={code_mol[jmol]:.2f} "
-                                    f"EQUILJ=NaN (exp_arg={exp_arg_poly:.4e}, "
-                                    f"T={temperature[j]:.4e}, TKEV={tkev[j]:.4e})\n"
-                                )
-                            else:
-                                f.write(
-                                    f"PY_NMOLEC: Molecule {jmol+1} CODE={code_mol[jmol]:.2f} "
-                                    f"EQUILJ={equilj[jmol]:.4e} (exp_arg={exp_arg_poly:.4e}, "
-                                    f"T={temperature[j]:.4e}, TKEV={tkev[j]:.4e})\n"
-                                )
 
                     if j == 0 and (
                         equilj[jmol] > 1e10 or not np.isfinite(equilj[jmol])
@@ -4151,37 +3888,10 @@ def nmolec_exact(
                     elif id_elem == 20:
                         equilj[jmol] = equilj[jmol] * cpfca
 
-                # DEBUG: Log EQUILJ after CPF corrections for molecules 167-185
-                if j == 0 and jmol in debug_molecules:
-                    debug_log_path = os.path.join(
-                        os.getcwd(), "logs/nmolec_debug_python.log"
-                    )
-                    with open(debug_log_path, "a") as f:
-                        if equilj_before_cpf is not None:
-                            f.write(
-                                f"PY_NMOLEC: EQUILJ after CPF: before={equilj_before_cpf:.4e} "
-                                f"after={equilj[jmol]:.4e}\n"
-                            )
-                        else:
-                            f.write(
-                                f"PY_NMOLEC: EQUILJ after CPF: {equilj[jmol]:.4e}\n"
-                            )
-
                 # CRITICAL: Fortran does NOT clamp EQUILJ - it allows inf/nan/negative values!
                 # Fortran (line 4649) does: EQUILJ(JMOL)=FRAC(J,NCOMP)/FRAC(J,1)*XNE(J)**ION
                 # No checks, no clamping - Fortran allows INF/NaN/NEGATIVE EQUILJ to propagate
                 # Match Fortran behavior exactly: do NOT modify EQUILJ after calculation!
-                # DEBUG: Log INF EQUILJ values for tracking (but don't modify)
-                if np.isinf(equilj[jmol]) and j == 0:
-                    debug_log_path = os.path.join(
-                        os.getcwd(), "logs/nmolec_debug_python.log"
-                    )
-                    with open(debug_log_path, "a") as f:
-                        f.write(
-                            f"PY_NMOLEC: Layer {j}, Molecule {jmol+1} (CODE={code_mol[jmol]:.2f}): "
-                            f"EQUILJ=INF (allowing to propagate like Fortran)\n"
-                        )
-
         # Newton-Raphson iteration
         eqold = np.zeros(nequa, dtype=np.float64)
         max_iter = 200
@@ -4197,15 +3907,6 @@ def nmolec_exact(
             if j == 0:
                 print(
                     f"  LOG-SPACE NEWTON enabled: log(XN[0])={log_xn[0]:.4f}, log(XN[{nequa-1}])={log_xn[nequa-1]:.4f}"
-                )
-
-        # DEBUG: Log iteration start for first layer
-        if j == 0:
-            debug_log_path = os.path.join(os.getcwd(), "logs/nmolec_debug_python.log")
-            with open(debug_log_path, "a") as f:
-                f.write(f"\nPY_NMOLEC: Layer {j} iteration loop starting\n")
-                f.write(
-                    f"PY_NMOLEC: Initial XN[0]={xn[0]:.17E}, atomic XNATOM={xnatom_atomic[j]:.17E}\n"
                 )
 
         # DECIMAL NEWTON: Use full 50-digit precision Newton iteration
@@ -4240,14 +3941,6 @@ def nmolec_exact(
 
             # Store results and continue to next layer
             xnatom_molecular[j] = xn[0]
-            if j == 0:
-                debug_log_path = os.path.join(
-                    os.getcwd(), "logs/nmolec_debug_python.log"
-                )
-                with open(debug_log_path, "a") as f:
-                    f.write(
-                        f"PY_NMOLEC: DECIMAL NEWTON result for layer 0: XN[0]={xn[0]:.6e}\n"
-                    )
 
             # Store XN to xnz_molecular and update xnz_prev
             for k in range(nequa):
@@ -4780,16 +4473,6 @@ def nmolec_exact(
                         f"layer={j+1} iter={iteration} call={pending_solvit_call} "
                         f"row={first_bad_row+1} col={first_bad_col+1} value={bad_value}",
                     )
-                    debug_log_path = os.path.join(
-                        os.getcwd(), "logs/nmolec_debug_python.log"
-                    )
-                    with open(debug_log_path, "a") as f:
-                        f.write(
-                            "PY_NMOLEC: Non-finite DEQ before SOLVIT "
-                            f"(layer={j+1} iter={iteration} call={pending_solvit_call} "
-                            f"row={first_bad_row+1} col={first_bad_col+1} "
-                            f"value={bad_value})\n"
-                        )
                 nonfinite_d_hits += 1
 
             # DEBUG: Print eq[0] right before creating eq_copy
@@ -4979,55 +4662,6 @@ def nmolec_exact(
             # Only skip if we can't even call the solver (but Fortran doesn't skip)
             # Remove NaN check to match Fortran's behavior
 
-            if trace_layer_before_solvit:
-                debug_log_path = os.path.join(
-                    os.getcwd(), "logs/nmolec_debug_python.log"
-                )
-                with open(debug_log_path, "a") as f:
-                    f.write(
-                        f"\nPY_TRACE_BEFORE_SOLVIT layer={j+1} iter={iteration+1}\n"
-                    )
-                    f.write(f"  EQ[0] = {eq_copy[0]:.17E}\n")
-                    eq_slice = eq_copy[: min(6, nequa)]
-                    f.write(
-                        "  EQ slice (first 6): "
-                        + ", ".join(f"{val:.3E}" for val in eq_slice)
-                        + "\n"
-                    )
-                    max_abs_eq = (
-                        np.max(np.abs(eq_copy[np.isfinite(eq_copy)]))
-                        if np.any(np.isfinite(eq_copy))
-                        else float("nan")
-                    )
-                    f.write(f"  EQ max abs (finite) = {max_abs_eq:.3E}\n")
-                    trace_cols = _TRACE_DEQ_COLS or {TRACE_A9_COL}
-                    for col in sorted(trace_cols):
-                        if col < 0 or col >= nequa:
-                            continue
-                        f.write(f"  DEQ column {col+1} (row values):\n")
-                        for row in range(nequa):
-                            val = deq_2d[row, col]
-                            if np.isfinite(val):
-                                val_str = f"{val:.17E}"
-                            elif np.isinf(val):
-                                val_str = "inf" if val > 0 else "-inf"
-                            else:
-                                val_str = "nan"
-                            f.write(f"    a[{row+1:2d},{col+1:2d}] = {val_str}\n")
-                    xn_slice = xn[: min(6, nequa)]
-                    f.write(
-                        "  XN slice (first 6): "
-                        + ", ".join(f"{float(val):.3E}" for val in xn_slice)
-                        + "\n"
-                    )
-                    finite_xn = xn[np.isfinite(xn)]
-                    if finite_xn.size:
-                        f.write(
-                            f"  XN max abs (finite) = {np.max(np.abs(finite_xn)):.3E}\n"
-                        )
-                    else:
-                        f.write("  XN max abs (finite) = nan\n")
-
             _enforce_electron_coupling()
 
             if j == 0 and iteration < 5:
@@ -5060,12 +4694,6 @@ def nmolec_exact(
                     print(
                         f"PY_NMOLEC: Layer {j:3d} Before SOLVIT: EQ[0]={eq_copy[0]:12.4e} DEQ[0,0]={deq11_val:12.4e}"
                     )
-                    # Also write to log file for comparison
-                    debug_log_path = os.path.join(
-                        os.getcwd(), "logs/nmolec_debug_python.log"
-                    )
-                    with open(debug_log_path, "a") as f:
-                        f.write(f"PY_NMOLEC: Before SOLVIT, EQ[0]={eq_copy[0]:12.4e}\n")
 
             # DEBUG: Trace XN[22] (electrons) before SOLVIT for XNE investigation
             if j == 0 and iteration == 0:
@@ -5089,16 +4717,9 @@ def nmolec_exact(
                 for kk in range(nequa):
                     print(f"  DEQ({kk+1:2d},{kk+1:2d})={deq_2d[kk, kk]:12.4E}")
                 print("PY_NMOLEC: DEQ row 1 (DEQ(1,K)) BEFORE SOLVIT:")
-                # Also write to log file for extraction script
-                debug_log_path = os.path.join(
-                    os.getcwd(), "logs/nmolec_debug_python.log"
-                )
-                with open(debug_log_path, "a") as f:
-                    f.write("PY_NMOLEC: DEQ row 1 (DEQ(1,K)) BEFORE SOLVIT:\n")
-                    for kk in range(nequa):
-                        line = f"  DEQ( 1,{kk+1:2d})={deq_2d[0, kk]:12.4E}\n"
-                        print(line.rstrip())
-                        f.write(line)
+                for kk in range(nequa):
+                    line = f"  DEQ( 1,{kk+1:2d})={deq_2d[0, kk]:12.4E}\n"
+                    print(line.rstrip())
                 # DEBUG: Check DEQ(1,22) vs DEQ(22,22) relationship
                 if idequa[nequa - 1] == 100:  # Electrons included
                     # CRITICAL: DEQ(1,22) is at row 1, col 22 in 1-based (row 1, col 22 in 0-based)
@@ -5328,24 +4949,11 @@ def nmolec_exact(
                 )
             if trace_eq_full_now and delta_xn is not None:
                 print(f"PY_NMOLEC: After SOLVIT, EQ[0]={delta_xn[0]:12.4e}")
-                # Also write to log file for comparison
-                debug_log_path = os.path.join(
-                    os.getcwd(), "logs/nmolec_debug_python.log"
-                )
-                with open(debug_log_path, "a") as f:
-                    f.write(f"PY_NMOLEC: After SOLVIT, EQ[0]={delta_xn[0]:12.4e}\n")
                 # Print DEQ row 1 AFTER SOLVIT (matrix has been modified by Gaussian elimination)
                 print("PY_NMOLEC: DEQ row 1 (DEQ(1,K)) AFTER SOLVIT:")
-                # Also write to log file for extraction script
-                debug_log_path = os.path.join(
-                    os.getcwd(), "logs/nmolec_debug_python.log"
-                )
-                with open(debug_log_path, "a") as f:
-                    f.write("PY_NMOLEC: DEQ row 1 (DEQ(1,K)) AFTER SOLVIT:\n")
-                    for kk in range(nequa):
-                        line = f"  DEQ( 1,{kk+1:2d})={matrix_for_solvit[0, kk]:12.4E}\n"
-                        print(line.rstrip())
-                        f.write(line)
+                for kk in range(nequa):
+                    line = f"  DEQ( 1,{kk+1:2d})={matrix_for_solvit[0, kk]:12.4E}\n"
+                    print(line.rstrip())
 
             # CRITICAL: SOLVIT should never return None now - it continues even with zero pivot
             # But keep this check for safety
@@ -5413,19 +5021,6 @@ def nmolec_exact(
                     eq_vec=eq,
                     xn_vec=xn,
                 )
-
-            # Detailed logging for comparison with Fortran traces
-            if j == 0 and (iteration + 1) in _TRACE_ITERATIONS:
-                debug_log_path = os.path.join(
-                    os.getcwd(), "logs/nmolec_debug_python.log"
-                )
-                with open(debug_log_path, "a") as f:
-                    f.write(f"PY_EQ_AFTER_SOLVIT: ITER={iteration+1:3d} (layer {j})\n")
-                    for k_idx in range(nequa):
-                        f.write(f"  EQ[{k_idx+1:2d}]={eq[k_idx]: .17E}\n")
-                    f.write(f"PY_XN_BEFORE_UPDATE: ITER={iteration+1:3d} (layer {j})\n")
-                    for k_idx in range(nequa):
-                        f.write(f"  XN[{k_idx+1:2d}]={xn[k_idx]: .17E}\n")
 
             # Debug: Print first iteration for first layer
             if _TRACE_XN_FULL and j == 0 and iteration == 0:
@@ -5539,18 +5134,6 @@ def nmolec_exact(
                         )
 
                 # Note: xnatom_inout will be updated after xn[k] is assigned (see below)
-
-                # DEBUG: Log XN[1] update for first layer to compare with Fortran
-                if j == 0 and k == 1:  # Helium (k=1, 0-based)
-                    debug_log_path = os.path.join(
-                        os.getcwd(), "logs/nmolec_debug_python.log"
-                    )
-                    with open(debug_log_path, "a") as f:
-                        f.write(
-                            f"PY_NMOLEC: XN[{k}] update: iteration={iteration}, "
-                            f"XN[{k}] before={xn[k]:12.4e}, EQ[{k}]={eq[k]:12.4e}, "
-                            f"xneq={xneq:12.4e}, xn100={xn100:12.4e}\n"
-                        )
 
                 # DEBUG: Log XN[22] (electrons) update to investigate XNE explosion
                 if j == 0 and k == nequa - 1:  # Electrons (k=22, 0-based)
@@ -5726,27 +5309,6 @@ def nmolec_exact(
                         f.write(f"    xn[k] AFTER assignment = {xn[k]:.6e}\n")
                         f.write(f"\n")
 
-                if j == 0 and (iteration + 1) in _TRACE_ITERATIONS:
-                    debug_log_path = os.path.join(
-                        os.getcwd(), "logs/nmolec_debug_python.log"
-                    )
-                    with open(debug_log_path, "a") as f:
-                        f.write(
-                            "PY_XN_UPDATE: ITER={iter:3d} K={k:2d} "
-                            "XN_BEFORE={xn_before: .17E} EQ={eq_val: .17E} "
-                            "XNEQ={xneq: .17E} XN100={xn100: .17E} "
-                            "BRANCH={branch} SCALE={scale_used: .17E}\n".format(
-                                iter=iteration + 1,
-                                k=k + 1,
-                                xn_before=xn_before,
-                                eq_val=eq[k],
-                                xneq=xneq,
-                                xn100=xn100,
-                                branch=branch,
-                                scale_used=scale_used,
-                            )
-                        )
-
                 eqold[k] = eq[k]
 
                 if _TRACE_NEWTON_UPDATES:
@@ -5791,28 +5353,6 @@ def nmolec_exact(
                     for k_idx in range(min(nequa, 5)):
                         f.write(f"  XN[{k_idx}] = {xn[k_idx]:.6e}\n")
 
-            # DEBUG: Log convergence check for first layer
-            # Log every iteration for first 10, then every 10th, and always when converged
-            should_log = j == 0 and (
-                iteration < 10 or iteration % 10 == 0 or iferr == 0
-            )
-            if should_log:
-                debug_log_path = os.path.join(
-                    os.getcwd(), "logs/nmolec_debug_python.log"
-                )
-                with open(debug_log_path, "a") as f:
-                    f.write(
-                        f"PY_NMOLEC: Layer {j} iter {iteration+1}: iferr={iferr}, XN[0]={xn[0]:.17E}\n"
-                    )
-                    if iteration < 5:
-                        f.write(
-                            f"PY_NMOLEC:   EQ[0]={eq[0]:.17E}, EQ[1]={eq[1] if nequa > 1 else 0:.17E}\n"
-                        )
-                        ratio0 = abs(eq[0] / xn[0]) if xn[0] != 0 else 0
-                        f.write(f"PY_NMOLEC:   RATIO[0]={ratio0:.6f}\n")
-                        if nequa > 1:
-                            ratio1 = abs(eq[1] / xn[1]) if xn[1] != 0 else 0
-                            f.write(f"PY_NMOLEC:   RATIO[1]={ratio1:.6f}\n")
             # When tracing mismatch with Fortran (ITER=4 vs ITER=24), dump all ratios
             if _TRACE_RATIO and j == 0 and (iteration + 1) in _TRACE_ITERATIONS:
                 for k_dump in range(nequa):
@@ -5838,39 +5378,8 @@ def nmolec_exact(
             iteration_one_based = iteration + 1
             if iferr == 0:
                 if MIN_NEWTON_ITER > 0 and iteration_one_based < MIN_NEWTON_ITER:
-                    if j == 0:
-                        debug_log_path = os.path.join(
-                            os.getcwd(), "logs/nmolec_debug_python.log"
-                        )
-                        with open(debug_log_path, "a") as f:
-                            f.write(
-                                "PY_NMOLEC: Layer {layer} iter {iter} hit iferr=0 "
-                                "but continuing to honor MIN_NEWTON_ITER={min_iter}\n".format(
-                                    layer=j,
-                                    iter=iteration_one_based,
-                                    min_iter=MIN_NEWTON_ITER,
-                                )
-                            )
                     continue
                 converged = True
-                # DEBUG: Log convergence for first layer
-                if j == 0:
-                    debug_log_path = os.path.join(
-                        os.getcwd(), "logs/nmolec_debug_python.log"
-                    )
-                    with open(debug_log_path, "a") as f:
-                        f.write(
-                            f"PY_NMOLEC: Layer {j} CONVERGED after {iteration+1} iterations\n"
-                        )
-                        f.write(f"PY_NMOLEC: Final XN values (all elements):\n")
-                        for k in range(nequa):
-                            f.write(f"PY_NMOLEC:   XN[{k}]={xn[k]:.17E}\n")
-                        f.write(f"PY_NMOLEC: Final EQ values (all elements):\n")
-                        for k in range(nequa):
-                            ratio = abs(eq[k] / xn[k]) if xn[k] != 0 else 0
-                            f.write(
-                                f"PY_NMOLEC:   EQ[{k}]={eq[k]:.17E}, RATIO[{k}]={ratio:.17E}\n"
-                            )
                 break
 
         # CRITICAL: Fortran ALWAYS uses XN(1) as XNATOM(J) after the iteration loop
@@ -5881,14 +5390,6 @@ def nmolec_exact(
         # To match Fortran exactly, always store XN(1) as the molecular XNATOM for
         # this layer, without any additional thresholds or fallbacks.
         xnatom_molecular[j] = xn[0]
-        if j == 0:
-            debug_log_path = os.path.join(os.getcwd(), "logs/nmolec_debug_python.log")
-            with open(debug_log_path, "a") as f:
-                f.write(
-                    "PY_NMOLEC: Storing XN[0] as XNATOM for layer 0 "
-                    f"(Fortran-consistent): XN[0]={xn[0]:.6e}, "
-                    f"atomic XNATOM={xnatom_atomic[j]:.6e}\n"
-                )
 
         # Fortran line 5049-5050: Store XN to XNZ after iteration
         # DO 107 K=1,NEQUA
@@ -5908,15 +5409,6 @@ def nmolec_exact(
 
         # Compute molecular number densities
         # From atlas7v_1.for lines 3831-3842
-        # DEBUG: Log XN values used for XNMOL calculation for first layer
-        if j == 0:
-            debug_log_path = os.path.join(os.getcwd(), "logs/nmolec_debug_python.log")
-            with open(debug_log_path, "a") as f:
-                f.write(f"PY_NMOLEC: Computing XNMOL for layer {j}\n")
-                f.write(
-                    f"PY_NMOLEC: XN values (first 5): {[xn[k] for k in range(min(5, nequa))]}\n"
-                )
-
         for jmol in range(nummol):
             ncomp = locj[jmol + 1] - locj[jmol]
             xnmol[j, jmol] = equilj[jmol]
@@ -5930,16 +5422,6 @@ def nmolec_exact(
                     xnmol[j, jmol] = xnmol[j, jmol] / xn[k]
                 else:
                     xnmol[j, jmol] = xnmol[j, jmol] * xn[k]
-
-        # DEBUG: Log final XNMOL values for first layer
-        if j == 0:
-            debug_log_path = os.path.join(os.getcwd(), "logs/nmolec_debug_python.log")
-            with open(debug_log_path, "a") as f:
-                f.write(f"PY_NMOLEC: Final XNMOL values (all molecules):\n")
-                for jmol in range(nummol):
-                    f.write(
-                        f"PY_NMOLEC:   Molecule {jmol+1:3d} (CODE={code_mol[jmol]:8.2f}): {xnmol[j, jmol]:.17E}\n"
-                    )
 
     return xnatom_molecular, xnmol, xnz_molecular
 
@@ -6338,16 +5820,6 @@ def _nmolec_newton_bounded(
 
     # Use best solution found
     xn_solution = best_xn if not converged else np.exp(log_xn)
-
-    # Debug logging for layer 0
-    if layer_idx == 0:
-        debug_log_path = os.path.join(os.getcwd(), "logs/nmolec_debug_python.log")
-        with open(debug_log_path, "a") as f:
-            f.write(
-                f"PY_NMOLEC: BOUNDED NEWTON layer {layer_idx}: "
-                f"iterations={iteration+1}, converged={converged}, "
-                f"XN[0]={xn_solution[0]:.6e}, best_res={best_res_norm:.6e}\n"
-            )
 
     return xn_solution, converged
 

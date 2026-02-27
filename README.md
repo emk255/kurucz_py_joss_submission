@@ -1,49 +1,40 @@
-# Kurucz Validation Workflow
+# Kurucz Python Synthesis
 
-This repo runs a practical Fortran-vs-Python validation loop on `samples/*.atm`.
+Python implementation of Kurucz-style spectrum synthesis. Reads `.atm` atmosphere files and produces spectra via `run_python_pipeline.sh`.
 
-## Current Workflow
+## Workflow
 
-1. Compile Fortran once.
-2. For each atmosphere file:
-   - Fortran run -> `results/validation_100/fortran_specs/<name>.spec`
-   - Python run (`convert_atm_to_npz.py` + `synthe_py.cli`) ->
-     - `results/validation_100/python_npz/<name>.npz`
-     - `results/validation_100/python_specs/<name>.spec`
-3. Inspect differences with `plot.py`.
+1. **Prerequisites**: `synthe_py/data/fortran_data.npz`, `synthe_py/data/atlas_tables.npz`, `lines/gfallvac.latest`
+2. Run synthesis: `./run_python_pipeline.sh <atm_file> <wl_start> <wl_end>`
+3. Plot: `python3 plot.py --spec <stem>_<wl>_<wl>.spec`
 
-Default validation settings:
+Default wavelength: 300–1800 nm, resolution 300000.
 
-- Wavelength: `300` to `1800` nm
-- Resolution: `300000`
-
-## Directory Structure (Relevant)
+## Directory Structure
 
 ```text
-kurucz/
-├── bin/                         # Fortran executables
-├── lines/                       # continua.dat, molecules.dat, gfallvac.latest, ...
+kurucz_python/
+├── lines/                       # gfallvac.latest, continua.dat, molecules.dat, ...
 ├── samples/                     # Input atmospheres (*.atm)
-├── synthe/Lines_v5_PL/          # Prebuilt Fortran tfort.* bundle
-├── synthe_py/                   # Python pipeline
-├── requirements.txt             # Python dependencies
-├── compile_fortran.sh
-├── run_fortran_atm.sh
-├── run_validation_100.sh
-├── plot.py
-└── results/validation_100/
-    ├── fortran_specs/
-    ├── python_npz/
-    ├── python_specs/
-    └── logs/
+├── synthe_py/
+│   ├── data/                    # atlas_tables.npz, fortran_data.npz, ...
+│   ├── out/line_cache/          # Parsed & compiled line caches (populated on first run)
+│   ├── tools/                   # convert_atm_to_npz, extract_*, ...
+│   └── ...
+├── results/
+│   ├── npz/                     # Converted atmosphere NPZ files
+│   ├── spec/                    # Output spectra (*.spec)
+│   ├── logs/                    # Pipeline logs
+│   └── plots/                   # Saved plot images (from plot.py)
+├── requirements.txt
+├── run_python_pipeline.sh
+└── plot.py
 ```
 
 ## 1) Python Setup
 
-Create a virtual environment and install dependencies:
-
 ```bash
-cd /path/to/kurucz
+cd /path/to/kurucz_python
 python3 -m venv .venv
 source .venv/bin/activate   # On Windows: .venv\Scripts\activate
 pip install -r requirements.txt
@@ -51,71 +42,42 @@ pip install -r requirements.txt
 
 Key dependencies: `numpy`, `scipy`, `numba`, `matplotlib`.
 
-## 2) Build Fortran
+## 2) Prerequisites
+
+Ensure these exist before running the pipeline:
+
+- `synthe_py/data/atlas_tables.npz` — from `extract_atlas_tables.py` or repo data
+- `synthe_py/data/fortran_data.npz` — run `python synthe_py/tools/extract_fortran_data.py` if missing
+- `lines/gfallvac.latest` — atomic line list
+
+## 3) Run Synthesis
+
+One-command wrapper (parameters: `.atm` file, `wl_start`, `wl_end`):
 
 ```bash
-cd /path/to/kurucz
-./compile_fortran.sh
-```
-
-## 3) Run Validation
-
-Run all samples (both Fortran and Python):
-
-```bash
-cd /Users/ElliotKim/Desktop/Research/kurucz
-./run_validation_100.sh -n all
-```
-
-Run one sample:
-
-```bash
-cd /Users/ElliotKim/Desktop/Research/kurucz
-./run_validation_100.sh -n 1 --atm at12_aaaaa_t02500g-1.0.atm
-```
-
-Run only Python synthesis (skip Fortran):
-
-```bash
-./run_validation_100.sh -n all --python-only
-./run_validation_100.sh -n 1 --atm at12_aaaaa_t02500g-1.0.atm --python-only
-```
-
-Run only Fortran synthesis (skip Python):
-
-```bash
-./run_validation_100.sh -n all --fortran-only
-./run_validation_100.sh -n 1 --atm at12_aaaaa_t02500g-1.0.atm --fortran-only
-```
-
-Resume behavior is automatic:
-
-- skips Fortran if output spec already exists
-- skips Python if output spec already exists
-
-## 4) Python-Only Pipeline
-
-One-command wrapper (only parameters: `.atm`, `wl_start`, `wl_end`):
-
-```bash
-cd /Users/ElliotKim/Desktop/Research/kurucz
+cd /path/to/kurucz_python
 ./run_python_pipeline.sh samples/at12_aaaaa_t02500g-1.0.atm 300 1800
 ```
+
+Output:
+
+- `results/npz/at12_aaaaa_t02500g-1.0.npz`
+- `results/spec/at12_aaaaa_t02500g-1.0_300_1800.spec`
+- `results/logs/at12_aaaaa_t02500g-1.0_300_1800.log`
 
 Equivalent explicit commands:
 
 ```bash
-cd /Users/ElliotKim/Desktop/Research/kurucz
 python3 synthe_py/tools/convert_atm_to_npz.py \
   samples/at12_aaaaa_t02500g-1.0.atm \
-  results/validation_100/python_npz/at12_aaaaa_t02500g-1.0.npz \
+  results/npz/at12_aaaaa_t02500g-1.0.npz \
   --atlas-tables synthe_py/data/atlas_tables.npz
 
 python3 -m synthe_py.cli \
   samples/at12_aaaaa_t02500g-1.0.atm \
   lines/gfallvac.latest \
-  --npz results/validation_100/python_npz/at12_aaaaa_t02500g-1.0.npz \
-  --spec results/validation_100/python_specs/at12_aaaaa_t02500g-1.0.spec \
+  --npz results/npz/at12_aaaaa_t02500g-1.0.npz \
+  --spec results/spec/at12_aaaaa_t02500g-1.0_300_1800.spec \
   --wl-start 300 --wl-end 1800 \
   --resolution 300000 \
   --n-workers "$(python3 -c 'import os; print(os.cpu_count() or 1)')" \
@@ -123,25 +85,14 @@ python3 -m synthe_py.cli \
   --log-level INFO
 ```
 
-Diagnostics are opt-in only. If `--diagnostics` is not passed, no diagnostics NPZ is written by `synthe_py.cli`.
+## 4) Caching (Line Data)
 
-## Caching (Python Line Data)
+Python synthesis uses two cache layers in `synthe_py/out/line_cache`:
 
-Python synthesis uses two line-data cache layers:
+- **Parsed cache**: parsed `gfallvac.latest` arrays
+- **Compiled cache**: runtime-ready compiled line arrays (keyed by wavelength range + resolution)
 
-- Parsed cache: stores parsed `gfallvac.latest` arrays (base parse cache).
-- Compiled cache: stores runtime-ready compiled line arrays.
-
-Cache location is controlled by `--cache` in `synthe_py.cli` (the validation script uses `synthe_py/out/line_cache`).
-
-What affects cache reuse:
-
-- Parsed cache key: source file fingerprint + cache logic version.
-- Compiled cache key: source fingerprint plus `wlbeg`, `wlend`, `resolution`, and `line_filter`.
-
-So if you change wavelength range or resolution, compiled cache entries are regenerated for those settings.
-
-To disable caches explicitly:
+Cache is populated on first run. To disable:
 
 ```bash
 PY_DISABLE_PARSED_CACHE=1 PY_DISABLE_COMPILED_CACHE=1 python3 -m synthe_py.cli ...
@@ -149,59 +100,34 @@ PY_DISABLE_PARSED_CACHE=1 PY_DISABLE_COMPILED_CACHE=1 python3 -m synthe_py.cli .
 
 ## 5) Plot Spectra
 
-Default (uses built-in defaults in `plot.py`):
+Plot normalized flux vs wavelength (default: `at12_aaaaa_t02500g-1.0_300_1800.spec`):
 
 ```bash
-cd /Users/ElliotKim/Desktop/Research/kurucz
 python3 plot.py
 ```
 
-By atmosphere name:
+By spectrum filename (under `results/spec/`):
 
 ```bash
-python3 plot.py --atmosphere at12_aaaaa_t04250g2.50.spec
+python3 plot.py --spec at12_aaaaa_t02500g-1.0_300_1800.spec
 ```
 
-Explicit file paths:
+Wavelength range and save path:
 
 ```bash
-python3 plot.py \
-  --python-spec results/validation_100/python_specs/at12_aaaaa_t04250g2.50.spec \
-  --fortran-spec results/validation_100/fortran_specs/at12_aaaaa_t04250g2.50.spec \
-  --wl-start 300 --wl-end 1800
+python3 plot.py --spec at12_aaaaa_t02500g-1.0_300_1800.spec \
+  --wl-start 400 --wl-end 700 --save spectrum.png --no-show
 ```
 
-## 6) Compare Spectra (Text Metrics)
+## 6) Compare Spectra (Optional)
 
-Use `synthe_py/tools/compare_spectra.py` to compute numeric agreement metrics.
-
-Basic comparison:
-
-```bash
-cd /Users/ElliotKim/Desktop/Research/kurucz
-python3 synthe_py/tools/compare_spectra.py \
-  results/validation_100/python_specs/at12_aaaaa_t04250g2.50.spec \
-  results/validation_100/fortran_specs/at12_aaaaa_t04250g2.50.spec
-```
-
-Restricted range with top outliers:
+Compare two spectrum files and compute numeric metrics:
 
 ```bash
 python3 synthe_py/tools/compare_spectra.py \
-  results/validation_100/python_specs/at12_aaaaa_t04250g2.50.spec \
-  results/validation_100/fortran_specs/at12_aaaaa_t04250g2.50.spec \
-  --range 300 1800 \
-  --top 20
+  results/spec/at12_aaaaa_t02500g-1.0_300_1800.spec \
+  results/spec/other_spectrum.spec \
+  --range 300 1800 --top 20
 ```
 
-What it reports:
-
-- Flux mean / median / RMS relative difference (%)
-- Continuum mean / median / RMS relative difference (%)
-- Normalized flux RMS (`F/C`)
-- Optional top-N fractional flux outlier wavelengths
-
-## Notes
-
-- Current Fortran validation path uses prebuilt `synthe/Lines_v5_PL/tfort.*` files.
-- Legacy debug scripts are not required for this current flow.
+Reports flux/continuum mean/median/RMS relative difference, normalized flux RMS, and top outlier wavelengths.
