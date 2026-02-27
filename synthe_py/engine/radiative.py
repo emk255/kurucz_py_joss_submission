@@ -15,9 +15,8 @@ _H_PLANCK = 6.62607015e-27  # erg * s
 _C_LIGHT = 2.99792458e10  # cm / s
 _C_LIGHT_NM = 2.99792458e17  # nm / s
 _K_BOLTZ = 1.380649e-16  # erg / K
-_RT_DEBUG_ENABLED = os.getenv("PY_ENABLE_RT_DEBUG", "0") == "1"
-_RT_AUTO_DEBUG_ENABLED = os.getenv("PY_ENABLE_RT_AUTO_DEBUG", "0") == "1"
-_RT_FAILURE_DEBUG_ENABLED = os.getenv("PY_ENABLE_RT_FAILURE_DEBUG", "0") == "1"
+
+
 def _planck_nu(freq: float, temperature: np.ndarray) -> np.ndarray:
     """Compute Planck function B_nu(T) using Fortran's exact formula.
 
@@ -51,8 +50,7 @@ def solve_lte_frequency(
     line_source: Optional[np.ndarray] = None,
     debug: bool = False,
 ) -> Tuple[float, float]:
-    # Keep deep RT diagnostics opt-in so standard parity runs remain deterministic.
-    debug = bool(debug and _RT_DEBUG_ENABLED)
+    debug = False
 
     # Filter INF/NaN values in continuum opacity (prevents TAUNU integration failure)
     # Fortran uses REAL*4 for CONTINUUM (max ~3.4e38), so filter values exceeding this
@@ -71,31 +69,6 @@ def solve_lte_frequency(
         & (line_scattering < MAX_OPACITY_REAL4)  # Filter very large line scattering
     )
     if not np.any(mask):
-        # CRITICAL DEBUG: Why is mask all False?
-        if _RT_FAILURE_DEBUG_ENABLED:
-            print(f"\n{'='*70}")
-            print(f"CRITICAL: All layers filtered out in solve_lte_frequency!")
-            print(f"{'='*70}")
-            print(f"  Wavelength: {wavelength_nm:.6f} nm")
-            print(f"  Total layers: {len(column_mass)}")
-            print(f"  column_mass >= 0: {np.sum(column_mass >= 0.0)}")
-            print(f"  isfinite(column_mass): {np.sum(np.isfinite(column_mass))}")
-            print(f"  isfinite(cont_abs): {np.sum(np.isfinite(cont_abs))}")
-            print(f"  isfinite(cont_scat): {np.sum(np.isfinite(cont_scat))}")
-            print(f"  isfinite(line_opacity): {np.sum(np.isfinite(line_opacity))}")
-            print(f"  isfinite(line_scattering): {np.sum(np.isfinite(line_scattering))}")
-            print(f"  cont_abs < MAX: {np.sum(cont_abs < MAX_OPACITY_REAL4)}")
-            print(f"  cont_scat < MAX: {np.sum(cont_scat < MAX_OPACITY_REAL4)}")
-            print(f"  line_opacity < MAX: {np.sum(line_opacity < MAX_OPACITY_REAL4)}")
-            print(f"  line_scattering < MAX: {np.sum(line_scattering < MAX_OPACITY_REAL4)}")
-            print(
-                f"  line_opacity max: {np.max(line_opacity) if line_opacity.size > 0 else 'N/A':.8E}"
-            )
-            print(
-                f"  line_scattering max: {np.max(line_scattering) if line_scattering.size > 0 else 'N/A':.8E}"
-            )
-            print(f"  Mask sum: {np.sum(mask)}")
-            print(f"{'='*70}\n")
         return 0.0, 0.0
 
     # RHOX is now read correctly from fort.5 (not fort.10's wrong "depth" field)
@@ -105,15 +78,6 @@ def solve_lte_frequency(
     # Filter out zero-depth layers (invalid layers at the end)
     valid_mask = mass_raw > 0
     if not np.any(valid_mask):
-        # CRITICAL DEBUG: Why are all masses zero?
-        if _RT_FAILURE_DEBUG_ENABLED:
-            print(f"\n{'='*70}")
-            print(f"CRITICAL: All column masses are zero or negative!")
-            print(f"{'='*70}")
-            print(f"  Wavelength: {wavelength_nm:.6f} nm")
-            print(f"  mass_raw min/max: {mass_raw.min():.8E} / {mass_raw.max():.8E}")
-            print(f"  mass_raw > 0 count: {np.sum(mass_raw > 0)}")
-            print(f"{'='*70}\n")
         return 0.0, 0.0
 
     mass_valid = mass_raw[valid_mask]
@@ -228,196 +192,12 @@ def solve_lte_frequency(
     # No need to reverse line_src again here - it's already in the correct order
     # The reversal happened in the full array before masking, so masking preserves alignment
 
-    # CRITICAL DEBUG: Check line_source values at problematic wavelengths
-    if _RT_DEBUG_ENABLED and line_source is not None and (312.36 <= wavelength_nm <= 312.64):
-        print(f"\n{'='*70}")
-        print(f"DEBUG: Line source values at {wavelength_nm:.6f} nm")
-        print(f"{'='*70}")
-        print(f"  line_a_was_reversed: {line_a_was_reversed}")
-        print(
-            f"  ls_full shape (after reversal check): {ls_full.shape if 'ls_full' in locals() else 'N/A'}"
-        )
-        if "ls_full" in locals():
-            print(f"  ls_full[0] (first element): {ls_full[0]:.6e}")
-            print(f"  ls_full[-1] (last element): {ls_full[-1]:.6e}")
-        print(f"  ls shape (after masking): {ls.shape if ls is not None else 'None'}")
-        print(f"  line_src shape: {line_src.shape}")
-        print(f"  planck shape: {planck.shape}")
-        print(f"  line_src[0] (surface): {line_src[0]:.6e}")
-        print(f"  planck[0] (surface): {planck[0]:.6e}")
-        print(f"  line_src[-1] (deep): {line_src[-1]:.6e}")
-        print(f"  planck[-1] (deep): {planck[-1]:.6e}")
-        print(f"  line_src[0] / planck[0]: {line_src[0] / max(planck[0], 1e-40):.6e}")
-        print(
-            f"  line_src[-1] / planck[-1]: {line_src[-1] / max(planck[-1], 1e-40):.6e}"
-        )
-        print(f"  line_src == planck? {np.allclose(line_src, planck, rtol=1e-3)}")
-        print(f"  Max difference: {np.abs(line_src - planck).max():.6e}")
-        print(
-            f"  Is line_src reversed? {np.isclose(line_src[0], planck[-1], rtol=1e-3)}"
-        )
-        # Check alignment with line_a
-        if "line_a" in locals() and line_a.size > 0:
-            print(f"  Alignment check:")
-            print(f"    line_a[0] (surface): {line_a[0]:.6e}")
-            print(f"    line_a[-1] (deep): {line_a[-1]:.6e}")
-            # If aligned, line_src[0] should correspond to same layer as line_a[0]
-            # We can't directly check this, but we can verify line_src[0] != planck[-1] if aligned
-        print(f"{'='*70}\n")
-
-    # CRITICAL DEBUG: Check if line_opacity is being filtered out incorrectly
-    if (
-        _RT_DEBUG_ENABLED
-        and line_a.size > 0
-        and np.any(line_opacity > 0)
-        and np.all(line_a == 0)
-    ):
-        print(f"\n{'='*70}")
-        print(f"CRITICAL: line_opacity has non-zero values but line_a is all zeros!")
-        print(f"{'='*70}")
-        print(f"  Wavelength: {wavelength_nm:.6f} nm")
-        print(f"  line_opacity size: {line_opacity.size}")
-        print(f"  line_opacity non-zero count: {np.count_nonzero(line_opacity)}")
-        print(f"  line_opacity max: {np.max(line_opacity):.8E}")
-        print(f"  line_a size: {line_a.size}")
-        print(f"  line_a non-zero count: {np.count_nonzero(line_a)}")
-        print(f"  mask sum: {np.sum(mask)}")
-        print(f"  valid_mask sum: {np.sum(valid_mask)}")
-        if line_opacity.size > 0:
-            print(f"  line_opacity[0] (before mask): {line_opacity[0]:.8E}")
-            print(
-                f"  line_opacity[0] < MAX_OPACITY_REAL4? {line_opacity[0] < MAX_OPACITY_REAL4}"
-            )
-            print(f"  isfinite(line_opacity[0])? {np.isfinite(line_opacity[0])}")
-            # Check mask conditions for first layer
-            print(f"  mask[0] breakdown:")
-            print(f"    column_mass[0] >= 0: {column_mass[0] >= 0.0}")
-            print(f"    isfinite(column_mass[0]): {np.isfinite(column_mass[0])}")
-            print(f"    isfinite(cont_abs[0]): {np.isfinite(cont_abs[0])}")
-            print(f"    isfinite(cont_scat[0]): {np.isfinite(cont_scat[0])}")
-            print(f"    isfinite(line_opacity[0]): {np.isfinite(line_opacity[0])}")
-            print(
-                f"    isfinite(line_scattering[0]): {np.isfinite(line_scattering[0])}"
-            )
-            print(f"    cont_abs[0] < MAX: {cont_abs[0] < MAX_OPACITY_REAL4}")
-            print(f"    cont_scat[0] < MAX: {cont_scat[0] < MAX_OPACITY_REAL4}")
-            print(f"    line_opacity[0] < MAX: {line_opacity[0] < MAX_OPACITY_REAL4}")
-            print(
-                f"    line_scattering[0] < MAX: {line_scattering[0] < MAX_OPACITY_REAL4}"
-            )
-            print(f"    mask[0] = {mask[0]}")
-        if line_a.size > 0:
-            print(f"  line_a[0] (after mask): {line_a[0]:.8E}")
-        print(f"{'='*70}\n")
-
-    # Debug flag: enable for problematic wavelengths
-    problem_waves = [
-        300.911,
-        300.901,
-        300.189,
-        300.179,
-        302.681,
-        302.671,
-        302.500,
-        302.490,
-        306.009,
-        305.999,
-        300.12016916,  # Add wavelength with line opacity
-        300.00040572,
-        318.839251,
-        318.877513,
-    ]
-    auto_debug = _RT_AUTO_DEBUG_ENABLED and any(
-        abs(wavelength_nm - w) < 0.01 for w in problem_waves
-    )
-    debug = debug or auto_debug
-
-    # CRITICAL DEBUG: Always check planck[0] for 300.00040572
-    # Also enable debug for JOSH solver to get ATLAS7V debug output
-    debug_wavelength = _RT_AUTO_DEBUG_ENABLED and (
-        abs(wavelength_nm - 300.00040572) < 0.0001
-        or abs(wavelength_nm - 418.148489) < 0.0001
-        or abs(wavelength_nm - 403.188153) < 0.0001
-        or abs(wavelength_nm - 319.490345) < 0.0001
-    )
-    if debug_wavelength:
-        print(f"\n{'='*70}")
-        print(f"CRITICAL DEBUG: Wavelength {wavelength_nm:.8f} nm")
-        print(f"{'='*70}")
-        print(f"  freq = {freq:.6e} Hz")
-        print(f"  planck[0] = {planck[0]:.8E}")
-        print(f"  Expected planck[0] for 300.00040572 nm: 3.37116427E-08")
-        print(f"  Error: {(planck[0]/3.37116427E-08 - 1)*100:+.2f}%")
-        print(f"{'='*70}\n")
-
-    # Debug: Check line opacity and source function values
-    # Also enable debug if line opacity is huge (potential TAUNU overflow issue)
-    huge_line_opacity = (
-        _RT_AUTO_DEBUG_ENABLED and line_a[0] > 1e10 if line_a.size > 0 else False
-    )
-    if debug or huge_line_opacity:
-        print(f"\n{'='*70}")
-        print(f"PYTHON LINE OPACITY DEBUG (wavelength {wavelength_nm:.6f} nm)")
-        if huge_line_opacity:
-            print(f"  *** HUGE LINE OPACITY DETECTED - ENABLING DEBUG ***")
-        print(f"{'='*70}")
-        print(f"  Line opacity (surface, J=1): {line_a[0]:.8E}")
-        print(f"  Line opacity (deep, J={len(line_a)}): {line_a[-1]:.8E}")
-        print(f"  Line opacity max: {line_a.max():.8E} at layer {np.argmax(line_a)+1}")
-        print(f"  Line opacity min: {line_a.min():.8E}")
-        print(f"  Continuum opacity (surface): {cont_a[0]:.8E}")
-        print(f"  Continuum opacity (deep): {cont_a[-1]:.8E}")
-        print(f"  Line source (surface): {line_src[0]:.8E}")
-        print(f"  Line source (deep): {line_src[-1]:.8E}")
-        print(f"  Planck (surface): {planck[0]:.8E}")
-        print(f"  Planck (deep): {planck[-1]:.8E}")
-        print(f"  Total opacity (surface): {(cont_a[0] + line_a[0]):.8E}")
-        print(f"  Total opacity (deep): {(cont_a[-1] + line_a[-1]):.8E}")
-        print(f"  Line/Cont ratio (surface): {line_a[0] / max(cont_a[0], 1e-40):.6f}")
-        print(f"  Line/Cont ratio (deep): {line_a[-1] / max(cont_a[-1], 1e-40):.6f}")
-        print(f"{'='*70}\n")
-
-    # Enable debug for specific wavelengths to match Fortran debug output
-    # Also enable debug if line opacity is huge (potential TAUNU overflow issue)
-    debug_josh = debug or debug_wavelength or huge_line_opacity
-
-    # CRITICAL DEBUG: Check line_a values before passing to solve_josh_flux
-    if debug_josh:
-        print(f"\n{'='*70}")
-        print(f"BEFORE solve_josh_flux (TOTAL FLUX)")
-        print(f"{'='*70}")
-        print(f"  line_a size: {line_a.size}")
-        print(
-            f"  line_a[0] = {line_a[0]:.8E}" if line_a.size > 0 else "  line_a is empty"
-        )
-        print(f"  line_a max = {np.max(line_a):.8E}" if line_a.size > 0 else "  N/A")
-        print(f"  line_a non-zero count: {np.count_nonzero(line_a)}")
-        print(
-            f"  line_sig[0] = {line_sig[0]:.8E}"
-            if line_sig.size > 0
-            else "  line_sig is empty"
-        )
-        print(
-            f"  line_sig max = {np.max(line_sig):.8E}" if line_sig.size > 0 else "  N/A"
-        )
-        print(f"  line_sig non-zero count: {np.count_nonzero(line_sig)}")
-        print(f"{'='*70}\n")
-
     zero_line = np.zeros_like(line_a)
     zero_scatter = np.zeros_like(line_sig)
     # CRITICAL FIX: For continuum-only, SCONT should be Planck function, not scattering opacity!
     # In Fortran (atlas7v.for line 4477): SCONT(J) = BNU(J) for continuum-only
     # For continuum-only flux, use planck as scont (matching Fortran SCONT = BNU)
     # sigmac should be cont_s (scattering opacity), NOT planck!
-    # CRITICAL DEBUG: Verify cont_s is actually scattering opacity, not Planck function
-    if debug:
-        print(f"\n  DEBUG: Before solve_josh_flux (continuum-only):")
-        print(f"    cont_s[0] = {cont_s[0]:.8E}")
-        print(f"    planck[0] = {planck[0]:.8E}")
-        print(
-            f"    cont_s[0] == planck[0]? {np.isclose(cont_s[0], planck[0], rtol=1e-6)}"
-        )
-        print(f"    cont_a[0] = {cont_a[0]:.8E}")
     flux_cont = solve_josh_flux(
         cont_a,
         planck,  # scont: continuum source function (Planck function)
@@ -426,7 +206,7 @@ def solve_lte_frequency(
         cont_s,  # sigmac: continuum scattering opacity (CRITICAL FIX!)
         zero_scatter,
         mass,
-        debug=debug,
+        debug=False,
         debug_label=f"FLUX_CONT_{wavelength_nm:.8f}",
         temperature=temp,  # Pass temperature for debug output
     )
@@ -445,61 +225,10 @@ def solve_lte_frequency(
         cont_s,  # SIGMAC (scattering) - handled separately by JOSH solver
         line_sig,
         mass,
-        debug=debug_josh,
+        debug=False,
         debug_label=f"FLUX_TOTAL_{wavelength_nm:.8f}",
         temperature=temp,  # Pass temperature for debug output
     )
-
-    # CRITICAL DEBUG: Check if flux_total is zero
-    # Check for exactly zero OR very small values
-    if _RT_FAILURE_DEBUG_ENABLED and (
-        flux_total == 0.0
-        or abs(flux_total) < 1e-50
-        or np.isnan(flux_total)
-        or np.isinf(flux_total)
-    ):
-        print(f"\n{'='*70}")
-        print(f"CRITICAL: flux_total is zero/invalid in solve_lte_frequency!")
-        print(f"{'='*70}")
-        print(f"  Wavelength: {wavelength_nm:.6f} nm")
-        print(f"  flux_total = {flux_total:.8E}")
-        print(f"  cont_a size: {cont_a.size}")
-        print(
-            f"  cont_a[0] = {cont_a[0]:.8E}" if cont_a.size > 0 else "  cont_a is empty"
-        )
-        print(
-            f"  planck[0] = {planck[0]:.8E}" if planck.size > 0 else "  planck is empty"
-        )
-        print(
-            f"  line_a[0] = {line_a[0]:.8E}" if line_a.size > 0 else "  line_a is empty"
-        )
-        print(f"  mass size: {mass.size}")
-        print(f"  mass[0] = {mass[0]:.8E}" if mass.size > 0 else "  mass is empty")
-        print(f"{'='*70}\n")
-
-    # CRITICAL DEBUG: Check if flux_cont is zero
-    # Check for exactly zero OR very small values
-    if _RT_FAILURE_DEBUG_ENABLED and (
-        flux_cont == 0.0
-        or abs(flux_cont) < 1e-50
-        or np.isnan(flux_cont)
-        or np.isinf(flux_cont)
-    ):
-        print(f"\n{'='*70}")
-        print(f"CRITICAL: flux_cont is zero/invalid in solve_lte_frequency!")
-        print(f"{'='*70}")
-        print(f"  Wavelength: {wavelength_nm:.6f} nm")
-        print(f"  flux_cont = {flux_cont:.8E}")
-        print(f"  cont_a size: {cont_a.size}")
-        print(
-            f"  cont_a[0] = {cont_a[0]:.8E}" if cont_a.size > 0 else "  cont_a is empty"
-        )
-        print(
-            f"  planck[0] = {planck[0]:.8E}" if planck.size > 0 else "  planck is empty"
-        )
-        print(f"  mass size: {mass.size}")
-        print(f"  mass[0] = {mass[0]:.8E}" if mass.size > 0 else "  mass is empty")
-        print(f"{'='*70}\n")
 
     return flux_total, flux_cont
 

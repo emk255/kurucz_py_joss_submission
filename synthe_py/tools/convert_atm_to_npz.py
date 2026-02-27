@@ -371,26 +371,6 @@ def parse_atm_file(atm_path: Path) -> dict:
 
         raise ValueError("Could not parse GRAVITY/LOG G from .atm file")
 
-    # Debug: Print parsed abundances
-
-    if len(data["abundances"]) == 0:
-
-        print(f"  WARNING: No abundances parsed from .atm file!")
-
-    else:
-
-        print(
-            f"  Parsed {len(data['abundances'])} abundances: scale={data['abundance_scale']:.5f}"
-        )
-
-        # Print first few abundances
-
-        sorted_elems = sorted(data["abundances"].keys())[:10]
-
-        for elem in sorted_elems:
-
-            print(f"    Element {elem}: {data['abundances'][elem]:.5f}")
-
     return data
 
 
@@ -1126,13 +1106,6 @@ def compute_continuum_from_atm(
         ifop=ifop,  # Pass IFOP from .atm file to enable H2RAOP etc.
     )
 
-    # DEBUG: Print detailed opacity values for comparison with Fortran
-
-    print(f"\n  DEBUG: KAPP Continuum Opacity Values (for comparison with Fortran):")
-
-    print(f"  ACONT (linear) range: [{acont.min():.6e}, {acont.max():.6e}] cm²/g")
-
-    print(f"  SIGMAC (linear) range: [{sigmac.min():.6e}, {sigmac.max():.6e}] cm²/g")
 
     # Check for problematic values
 

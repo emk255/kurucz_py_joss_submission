@@ -5204,21 +5204,6 @@ def nmolec_exact(
                     f.write(f"  XN[22] = {xn[nequa - 1]:.6e}\n")
                     f.write("\n")
 
-            # DEBUG: Verify eq_copy hasn't been modified before SOLVIT call
-            if j == 0 and iteration == 0:
-                print(
-                    f"    DEBUG RIGHT BEFORE _solvit: eq_copy[0]={eq_copy[0]:.6e}, eq_copy[6]={eq_copy[6]:.6e}, eq_copy[13]={eq_copy[13]:.6e}"
-                )
-                print(
-                    f"    DEBUG: eq_copy id={id(eq_copy)}, eq_copy shape={eq_copy.shape}"
-                )
-                if eq_copy[0] > 1e70:
-                    print(
-                        f"    ⚠️  WARNING: eq_copy[0]={eq_copy[0]:.6e} is HUGE right before _solvit call!"
-                    )
-                    print(
-                        f"    DEBUG: eq_copy values: eq_copy[0]={eq_copy[0]:.6e}, eq_copy[6]={eq_copy[6]:.6e}, eq_copy[13]={eq_copy[13]:.6e}"
-                    )
             solvit_call_counter += 1
             current_call_idx = solvit_call_counter
 

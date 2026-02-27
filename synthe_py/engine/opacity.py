@@ -11,7 +11,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -35,6 +35,7 @@ from ..physics.hydrogen_wings import (
 from ..physics.profiles import hydrogen_line_profile, voigt_profile
 from .radiative import solve_lte_spectrum
 from .buffers import SynthResult, allocate_buffers
+from synthe_py.tools import pops_exact
 
 MAX_PROFILE_STEPS = 1_000_000
 H_PLANCK = 6.62607015e-27  # erg * s
@@ -416,13 +417,7 @@ _ELEMENT_Z = {
 }
 _ELEMENT_SYMBOL_BY_Z = {value: key for key, value in _ELEMENT_Z.items()}
 
-_fort19_unhandled_types: Set[fort19_io.Fort19WingType] = set()
-
-# Fortran synthe.for XLINOP debug targets (WRITE 199 when J in 1,41,80 and WAVE near these)
-_XLINOP_DEBUG_TARGET_WAVES = (457.656906, 636.360933)
-_XLINOP_DEBUG_TARGET_TOL = 5.0e-4
-_XLINOP_DEBUG_DEPTHS = (0, 40, 79)  # 0-based (Fortran J=1,41,80)
-_EMPTY_FLOAT64 = np.empty(0, dtype=np.float64)
+_EMPTY_FLOAT64: np.ndarray = np.empty(0, dtype=np.float64)
 
 
 def _agent_load_fortran_spec(stem: str) -> Optional[np.ndarray]:
@@ -579,12 +574,6 @@ def _recompute_population_per_ion(atm: atmosphere.AtmosphereModel) -> None:
         logger.warning(
             "Skipping population_per_ion recompute (missing xabund/xnatm or thermo arrays)."
         )
-        return
-
-    try:
-        from synthe_py.tools import pops_exact
-    except Exception as exc:  # pragma: no cover - debug only
-        logger.warning("POPS exact not available: %s", exc)
         return
 
     logger.info("Recomputing population_per_ion using POPS exact (Fortran matching).")
@@ -795,52 +784,10 @@ def _load_line_data(
 
     if is_fort19_catalog or is_tfort12_catalog or is_tfort14_catalog:
         filtered_catalog = catalog
-        _logger.info(
-            "Line filtering skipped for fort.* catalog: using %d lines",
-            len(filtered_catalog.records),
-        )
     elif cfg.line_filter:
         filtered_catalog = atomic.filter_by_range(catalog, wl_min, wl_max)
-        _logger.info(
-            f"After filtering to wavelength range [{wl_min:.2f}, {wl_max:.2f}] nm: "
-            f"{len(filtered_catalog.records)} lines"
-        )
     else:
         filtered_catalog = catalog
-        _logger.info(
-            "Line filtering disabled: using full catalog of %d lines",
-            len(filtered_catalog.records),
-        )
-    # For narrow windows (e.g. detailed debugging over a small wavelength span),
-    # log the strongest few lines to make sure the expected transitions are present.
-    try:
-        if len(filtered_catalog.records) > 0 and (wl_max - wl_min) <= 5.0:
-            wl_arr = filtered_catalog.wavelength
-            loggf_arr = filtered_catalog.log_gf
-            order = np.argsort(loggf_arr)[::-1]
-            n_show = int(min(10, order.size))
-            _logger.info(
-                "Top %d lines in [%.3f, %.3f] nm by log(gf):", n_show, wl_min, wl_max
-            )
-            for rank, idx in enumerate(order[:n_show], start=1):
-                rec = filtered_catalog.records[int(idx)]
-                _logger.info(
-                    "  %2d: wl=%.4f nm element=%s ion=%d loggf=%.3f E_exc=%.3f eV",
-                    rank,
-                    float(rec.wavelength),
-                    rec.element,
-                    int(rec.ion_stage),
-                    float(rec.log_gf),
-                    float(rec.excitation_energy),
-                )
-    except Exception as exc:  # pragma: no cover - debug logging only
-        _logger.debug("Failed to log detailed line list diagnostics: %s", exc)
-    if len(filtered_catalog.records) == 0:
-        _logger.warning(
-            f"No lines found in wavelength range [{wl_min:.2f}, {wl_max:.2f}] nm. "
-            f"Original catalog had {len(catalog.records)} lines. "
-            f"This will result in continuum-only synthesis."
-        )
     return filtered_catalog
 
 
@@ -1708,12 +1655,6 @@ def _apply_fort19_profile(
         metal_sources_row += tmp_buffer * bnu_row
         return True
 
-    if wing_type not in _fort19_unhandled_types:
-        _fort19_unhandled_types.add(wing_type)
-        logging.getLogger(__name__).debug(
-            "fort.19 line_type %s not yet implemented; falling back to standard wings",
-            wing_type,
-        )
     return False
 
 
@@ -2103,45 +2044,6 @@ def _compute_hydrogen_line_opacity(
     n_wavelengths = wavelength_grid.size
     ahline = np.zeros((n_depths, n_wavelengths), dtype=np.float64)
 
-    debug_line = os.getenv("PY_DEBUG_HLINE")
-    debug_wave = os.getenv("PY_DEBUG_HLINE_WAVE")
-    debug_sum_wave = os.getenv("PY_DEBUG_HLINE_SUM_WAVE")
-    debug_sum_depth = os.getenv("PY_DEBUG_HLINE_SUM_DEPTH")
-    debug_sum_top = os.getenv("PY_DEBUG_HLINE_SUM_TOP")
-    debug_line_val = None
-    debug_wave_idx = None
-    sum_wave_val = None
-    sum_wave_idx = None
-    sum_depth_idx = None
-    sum_top_n = 10
-    if debug_line and debug_wave:
-        try:
-            debug_line_val = float(debug_line)
-            debug_wave_idx = int(np.argmin(np.abs(wavelength_grid - float(debug_wave))))
-        except ValueError:
-            debug_line_val = None
-            debug_wave_idx = None
-    if debug_sum_wave:
-        try:
-            sum_wave_val = float(debug_sum_wave)
-            sum_wave_idx = int(np.argmin(np.abs(wavelength_grid - sum_wave_val)))
-        except ValueError:
-            sum_wave_val = None
-            sum_wave_idx = None
-    if debug_sum_depth:
-        try:
-            depth_val = int(debug_sum_depth)
-            if depth_val > 0:
-                sum_depth_idx = depth_val - 1
-        except ValueError:
-            sum_depth_idx = None
-    if debug_sum_top:
-        try:
-            sum_top_n = max(1, int(debug_sum_top))
-        except ValueError:
-            sum_top_n = 10
-    sum_entries = []
-
     if (
         atmosphere_model.population_per_ion is None
         or atmosphere_model.doppler_per_ion is None
@@ -2283,57 +2185,6 @@ def _compute_hydrogen_line_opacity(
                 wtail = wcon + wcon
             wtail = min(wcon + wcon, wtail)
 
-            debug_before = None
-            sum_before = None
-            if (
-                debug_line_val is not None
-                and abs(line_wavelength - debug_line_val) < 1e-3
-                and depth_idx in (0, 19, 39, 49, 59, 79)
-            ):
-                if debug_wave_idx is not None:
-                    debug_before = ahline[depth_idx, debug_wave_idx]
-                print(
-                    f"PY_DEBUG_HLINE_KAPPA: line={line_wavelength:.6f} nm depth={depth_idx + 1} "
-                    f"center_idx={center_idx} kappa0_pre={kappa0_pre:.6e} "
-                    f"kappa0={kappa0:.6e} kapmin={kapmin:.6e}"
-                )
-                if debug_wave_idx is not None:
-                    dbg_wave = float(wavelength_grid[debug_wave_idx])
-                    dbg_stim = stim[depth_idx, debug_wave_idx]
-                    dbg_delta = dbg_wave - line_wavelength
-                    dbg_profile = hydrogen_line_profile(
-                        n_lower_eff,
-                        n_upper_eff,
-                        depth_state,
-                        dbg_delta,
-                    )
-                    dbg_value = kappa0 * dbg_profile * dbg_stim
-                    dbg_thresh = continuum[depth_idx, debug_wave_idx] * cutoff
-                    dbg_simple = n_upper <= n_lower + 2
-                    dbg_side = "red" if dbg_wave >= line_wavelength else "blue"
-                    dbg_gate = "open"
-                    if not dbg_simple:
-                        if dbg_side == "red" and dbg_wave > wlminus1:
-                            dbg_gate = "blocked_wlminus1"
-                        elif dbg_side == "blue" and (
-                            dbg_wave < wcon or dbg_wave < wlplus1
-                        ):
-                            dbg_gate = "blocked_wcon_wlplus1"
-                    dbg_pass = (
-                        dbg_gate == "open" and dbg_value > 0.0 and dbg_value >= dbg_thresh
-                    )
-                    print(
-                        f"PY_DEBUG_HLINE_TARGET: line={line_wavelength:.6f} nm depth={depth_idx + 1} "
-                        f"wave={dbg_wave:.6f} side={dbg_side} simple={dbg_simple} gate={dbg_gate} "
-                        f"delta={dbg_delta:.6e} profile={dbg_profile:.6e} value={dbg_value:.6e} "
-                        f"threshold={dbg_thresh:.6e} pass={dbg_pass}"
-                    )
-            if (
-                sum_wave_idx is not None
-                and sum_depth_idx is not None
-                and depth_idx == sum_depth_idx
-            ):
-                sum_before = ahline[depth_idx, sum_wave_idx]
             profile_calls = _accumulate_hydrogen_profile(
                 buffer=ahline[depth_idx],
                 continuum_row=continuum[depth_idx],
@@ -2355,580 +2206,8 @@ def _compute_hydrogen_line_opacity(
                 bluecut=bluecut,
                 cutoff=cutoff,
             )
-            if debug_before is not None and debug_wave_idx is not None:
-                debug_after = ahline[depth_idx, debug_wave_idx]
-                debug_wave_val = float(wavelength_grid[debug_wave_idx])
-                print(
-                    f"PY_DEBUG_HLINE: line={line_wavelength:.6f} nm depth={depth_idx + 1} "
-                    f"center_idx={center_idx} wcon={wcon:.6f} wtail={wtail:.6f} "
-                    f"wlplus1={wlplus1:.6f} wlminus1={wlminus1:.6f} "
-                    f"wave={debug_wave_val:.6f} before={debug_before:.6e} after={debug_after:.6e}"
-                )
-            if sum_before is not None and sum_wave_idx is not None:
-                sum_after = ahline[depth_idx, sum_wave_idx]
-                contrib = sum_after - sum_before
-                if contrib > 0.0:
-                    sum_entries.append(
-                        (contrib, float(line_wavelength), int(n_lower), int(n_upper))
-                    )
-
-    if sum_wave_idx is not None and sum_depth_idx is not None and sum_entries:
-        sum_entries.sort(reverse=True, key=lambda item: item[0])
-        target_wave = float(wavelength_grid[sum_wave_idx])
-        print(
-            f"PY_DEBUG_HLINE_SUM: wave={target_wave:.6f} depth={sum_depth_idx + 1} "
-            f"lines={len(sum_entries)}"
-        )
-        total = 0.0
-        for contrib, wl_line, n_lower, n_upper in sum_entries[:sum_top_n]:
-            total += contrib
-            print(f"  line={wl_line:.6f} n={n_lower}->{n_upper} contrib={contrib:.6e}")
-        print(f"  top_sum={total:.6e}")
 
     return ahline
-
-
-def _process_metal_wings_depth_standalone(
-    args_tuple: Tuple,
-) -> Tuple[
-    int, np.ndarray, np.ndarray, np.ndarray, np.ndarray, int, int, Optional[int], list
-]:
-    """Standalone function to process metal line wings for a single depth (for multiprocessing).
-
-    Returns (depth_idx, local_wings, local_sources, helium_wings, helium_sources,
-    lines_processed, lines_skipped, debug_idx, debug_hits)
-    """
-    (
-        depth_idx,
-        state_dict,  # Serialized DepthState data
-        continuum_row,
-        wavelength,
-        line_indices,
-        catalog_wavelength,
-        catalog_gf,
-        catalog_gamma_rad,
-        catalog_gamma_stark,
-        catalog_gamma_vdw,
-        catalog_records,
-        metadata_dict,  # Serialized metadata or None
-        fort19_data_dict,  # Serialized fort19 data or None
-        catalog_to_meta,
-        catalog_to_fort19,
-        electron_density_val,
-        emerge_val,
-        emerge_h_val,
-        xnf_h_val,
-        xnf_he1_val,
-        xnf_h2_val,
-        temperature_val,
-        mass_density_val,
-        txnxn_val,
-        boltzmann_factor,
-        metal_tables_dict,
-        population_cache_dict,
-        ifvac,
-        cutoff,
-        bnu_row,
-        skip_helium,
-        skip_metals,
-        debug_wave_val,
-        debug_depth_val,
-        debug_top_n,
-        debug_line_val,
-        debug_line_eps,
-        debug_line_filter,
-    ) = args_tuple
-
-    # Use values directly (no need to reconstruct DepthState object)
-    # We only need: txnxn_val, electron_density_val, boltzmann_factor
-
-    # Reconstruct metadata if available
-    metadata = None
-    if metadata_dict is not None:
-        # Reconstruct from dict (simplified - may need full reconstruction)
-        metadata = metadata_dict
-
-    # Reconstruct fort19 data if available
-    fort19_data = None
-    if fort19_data_dict is not None:
-        fort19_data = fort19_data_dict
-
-    # Reconstruct metal tables
-    metal_tables = metal_tables_dict
-
-    # Reconstruct population cache
-    population_cache = population_cache_dict
-
-    tmp_buffer = np.zeros_like(wavelength, dtype=np.float64)
-    local_wings = np.zeros_like(wavelength, dtype=np.float64)
-    local_sources = np.zeros_like(wavelength, dtype=np.float64)
-    local_helium_wings = np.zeros_like(wavelength, dtype=np.float64)
-    local_helium_sources = np.zeros_like(wavelength, dtype=np.float64)
-
-    debug_idx = None
-    debug_hits = []
-    if debug_wave_val is not None and debug_depth_val is not None:
-        if debug_depth_val == depth_idx + 1:
-            debug_idx = int(np.argmin(np.abs(wavelength - debug_wave_val)))
-
-    lines_processed = 0
-    lines_skipped = 0
-
-    # Pre-compute arrays to reduce Python overhead in loop
-    # Convert catalog arrays to numpy for faster access
-    n_lines = len(line_indices)
-    valid_line_mask = np.zeros(n_lines, dtype=bool)
-    line_wavelengths_array = np.asarray(catalog_wavelength, dtype=np.float64)
-    line_gf_array = np.asarray(catalog_gf, dtype=np.float64)
-    line_gamma_rad_array = np.asarray(catalog_gamma_rad, dtype=np.float64)
-    line_gamma_stark_array = np.asarray(catalog_gamma_stark, dtype=np.float64)
-    line_gamma_vdw_array = np.asarray(catalog_gamma_vdw, dtype=np.float64)
-    line_indices_array = np.asarray(line_indices, dtype=np.int64)
-
-    # Pre-compute metadata arrays if available
-    meta_ncon = None
-    meta_nelionx = None
-    meta_nelion = None
-    meta_alpha = None
-    meta_gamma_rad = None
-    meta_gamma_stark = None
-    meta_gamma_vdw = None
-    if metadata is not None:
-        meta_ncon = (
-            np.asarray(metadata.ncon, dtype=np.int32)
-            if hasattr(metadata, "ncon")
-            else None
-        )
-        meta_nelionx = (
-            np.asarray(metadata.nelionx, dtype=np.int32)
-            if hasattr(metadata, "nelionx")
-            else None
-        )
-        meta_nelion = (
-            np.asarray(metadata.nelion, dtype=np.int32)
-            if hasattr(metadata, "nelion")
-            else None
-        )
-        meta_alpha = (
-            np.asarray(metadata.extra1, dtype=np.float64)
-            if hasattr(metadata, "extra1")
-            else None
-        )
-        meta_gamma_rad = (
-            np.asarray(metadata.gamma_rad, dtype=np.float64)
-            if hasattr(metadata, "gamma_rad")
-            else None
-        )
-        meta_gamma_stark = (
-            np.asarray(metadata.gamma_stark, dtype=np.float64)
-            if hasattr(metadata, "gamma_stark")
-            else None
-        )
-        meta_gamma_vdw = (
-            np.asarray(metadata.gamma_vdw, dtype=np.float64)
-            if hasattr(metadata, "gamma_vdw")
-            else None
-        )
-
-    # Pre-compute catalog_to_meta mapping as array
-    meta_idx_array = np.full(n_lines, -1, dtype=np.int32)
-    if metadata is not None and catalog_to_meta:
-        for line_idx, meta_idx in catalog_to_meta.items():
-            if line_idx < n_lines:
-                meta_idx_array[line_idx] = meta_idx
-
-    # Pre-compute element keys and filter valid lines
-    element_keys_array = []
-    nelion_array = np.zeros(n_lines, dtype=np.int32)
-    for line_idx in range(n_lines):
-        if line_idx < len(catalog_records):
-            record = catalog_records[line_idx]
-            element_key = str(record.element).strip()
-            element_keys_array.append(element_key)
-            nelion_array[line_idx] = record.ion_stage
-        else:
-            element_keys_array.append("")
-
-    # Get Voigt tables once (for JIT kernel)
-    voigt_tables = tables.voigt_tables()
-    h0tab = voigt_tables.h0tab
-    h1tab = voigt_tables.h1tab
-    h2tab = voigt_tables.h2tab
-
-    for line_idx, center_index in enumerate(line_indices):
-        if (
-            debug_line_filter
-            and debug_line_val is not None
-            and abs(line_wavelengths_array[line_idx] - debug_line_val) > debug_line_eps
-        ):
-            continue
-        # CRITICAL FIX: Match Fortran synthe.for line 301 EXACTLY
-        # IF(NBUFF.LT.1.OR.NBUFF.GT.LENGTH)GO TO 320
-        # Fortran SKIPS lines whose centers are outside the grid - NO wing computation!
-        # Previous Python code computed wings for margin lines, causing ~60x too deep
-        # absorption at grid boundaries (first few wavelength points).
-        center_outside = center_index < 0 or center_index >= wavelength.size
-        if center_outside:
-            lines_skipped += 1
-            continue
-
-        # Use pre-computed arrays instead of dictionary lookups
-        meta_idx_val = meta_idx_array[line_idx] if meta_idx_array[line_idx] >= 0 else -1
-        record = catalog_records[line_idx]
-
-        # Skip hydrogen lines (faster check using pre-computed nelion)
-        if nelion_array[line_idx] == 1:
-            element_key = element_keys_array[line_idx]
-            if element_key.upper() in {"H", "H I", "HI"}:
-                lines_skipped += 1
-                continue
-
-        tmp_buffer.fill(0.0)
-        line19_idx = None
-        line_type_code = 0
-        wing_type = fort19_io.Fort19WingType.NORMAL
-        if fort19_data is not None:
-            line19_idx = catalog_to_fort19.get(line_idx)
-            if line19_idx is not None:
-                line_type_code = int(fort19_data.line_type[line19_idx])
-                wing_val = fort19_data.wing_type[line19_idx]
-                if isinstance(wing_val, fort19_io.Fort19WingType):
-                    wing_type = wing_val
-                else:
-                    wing_type = fort19_io.Fort19WingType.from_code(int(wing_val))
-
-        record_line_type = int(getattr(record, "line_type", 0) or 0)
-        is_helium_line = line_type_code in (-3, -4, -6) or record_line_type in (
-            -3,
-            -4,
-            -6,
-        )
-        if skip_helium and is_helium_line:
-            lines_skipped += 1
-            continue
-        if skip_metals and not is_helium_line:
-            lines_skipped += 1
-            continue
-        # ========== CORONAL LINE SKIP (Fortran line 793) ==========
-        # TYPE = 2 (Coronal lines): Skip entirely - GO TO 900
-        if line_type_code == 2:
-            lines_skipped += 1
-            continue
-
-        # Get metadata values using pre-computed arrays
-        if meta_idx_val >= 0:
-            ncon = meta_ncon[meta_idx_val] if meta_ncon is not None else 0
-            nelionx = meta_nelionx[meta_idx_val] if meta_nelionx is not None else 0
-            nelion = (
-                meta_nelion[meta_idx_val]
-                if meta_nelion is not None
-                else nelion_array[line_idx]
-            )
-            alpha = meta_alpha[meta_idx_val] if meta_alpha is not None else 0.0
-        else:
-            ncon = 0
-            nelionx = 0
-            nelion = nelion_array[line_idx]
-            alpha = 0.0
-        # When fort.9 metadata is disabled, still honor fort.19 continuum indices
-        # for special-profile lines (Fortran XLINOP uses NCON/NELIONX from fort.19).
-        if fort19_data is not None and line19_idx is not None:
-            ncon = int(fort19_data.continuum_index[line19_idx])
-            nelionx = int(fort19_data.element_index[line19_idx])
-        txnxn_line = txnxn_val
-
-        # Compute TXNXN with alpha correction if needed
-        if np.isfinite(alpha) and abs(alpha) > 1e-8:
-            atomic_mass = _atomic_mass_lookup(record.element)
-            if atomic_mass is not None and atomic_mass > 0.0:
-                t_j = temperature_val
-                v2 = 0.5 * (1.0 - alpha)
-                h_factor = (t_j / 10000.0) ** v2
-                # Fortran synthe.for line 467-468: 1/4 and 1/2 are INTEGER
-                # division → both evaluate to 0, leaving only 1.008/ATMASS.
-                he_factor = 0.628 * (2.0991e-4 * t_j * (1.008 / atomic_mass)) ** v2
-                h2_factor = 1.08 * (2.0991e-4 * t_j * (1.008 / atomic_mass)) ** v2
-                txnxn_line = (
-                    xnf_h_val * h_factor
-                    + xnf_he1_val * he_factor
-                    + xnf_h2_val * h2_factor
-                )
-
-        # Use pre-computed arrays
-        line_wavelength = line_wavelengths_array[line_idx]
-        element_key = element_keys_array[line_idx]
-
-        # Get populations from cache
-        if element_key not in population_cache:
-            lines_skipped += 1
-            continue
-        pop_densities, dop_velocity = population_cache[element_key]
-
-        if nelion > pop_densities.shape[1]:
-            lines_skipped += 1
-            continue
-
-        pop_val = pop_densities[depth_idx, nelion - 1]
-        if dop_velocity.ndim == 2:
-            dop_val = (
-                dop_velocity[depth_idx, nelion - 1]
-                if nelion <= dop_velocity.shape[1]
-                else dop_velocity[depth_idx, 0]
-            )
-        else:
-            dop_val = dop_velocity[depth_idx]
-
-        if pop_val <= 0.0 or dop_val <= 0.0:
-            lines_skipped += 1
-            continue
-
-        # XNFDOP = XNFPEL / DOPPLE
-        # From Fortran synthe.for line 240: QXNFDOP = QXNFPEL / (QRHO * QDOPPLE)
-        # Where:
-        #   - QXNFPEL from fort.10 is population per unit mass (cm³/g)
-        #   - QRHO is mass density (g/cm³)
-        #   - QDOPPLE is Doppler velocity (dimensionless, in units of c)
-        #
-        # CRITICAL FIX: pop_val from populations_saha.compute_population_densities
-        # returns population density (cm⁻³), NOT per unit mass!
-        # We need to convert to per unit mass: pop_per_mass = pop_density / rho
-        # Then: xnfdop = pop_per_mass / dop_val = pop_density / (rho * dop_val)
-        #
-        # This matches Fortran: QXNFDOP = QXNFPEL / QRHO / QDOPPLE
-        rho = mass_density_val if mass_density_val > 0.0 else 1.0
-        if rho > 0.0:
-            xnfdop = pop_val / (rho * dop_val)
-            doppler_width = dop_val * line_wavelength
-            boltz = boltzmann_factor[line_idx]
-
-            # CRITICAL FIX: Convert GF to CONGF by dividing by frequency
-            # From rgfall.for line 267: CGF = 0.026538/1.77245 * GF / FRELIN
-            # Where FRELIN = 2.99792458D17 / WLVAC (frequency in Hz)
-            freq_hz = C_LIGHT_NM / line_wavelength  # Frequency in Hz
-            gf_linear = line_gf_array[line_idx]  # Linear gf (use pre-computed array)
-            cgf = CGF_CONSTANT * gf_linear / freq_hz  # CONGF conversion
-
-            # ========== DOUBLE KAPMIN CHECK (Fortran lines 266-272) ==========
-            # Clamp center_index for continuum access
-            clamped_idx = max(0, min(center_index, wavelength.size - 1))
-            kappa_min = continuum_row[clamped_idx] * cutoff
-
-            # First: KAPPA0 = CONGF * XNFDOP (BEFORE Boltzmann)
-            kappa0_pre = cgf * xnfdop
-
-            # First check (Fortran line 267): IF(KAPPA0.LT.KAPMIN)GO TO 350
-            if kappa0_pre < kappa_min:
-                lines_skipped += 1
-                continue
-
-            # Apply Boltzmann factor (Fortran line 270)
-            kappa0 = kappa0_pre * boltz
-
-            # Second check (Fortran line 272): IF(KAPPA0.LT.KAPMIN)GO TO 350
-            # RE-ENABLED: This matches Fortran behavior and prevents weak line accumulation
-            if kappa0 < kappa_min:
-                lines_skipped += 1
-                continue
-
-        # Post-Boltzmann cutoff already applied at line 1575
-        # Only check doppler_width validity here
-        if doppler_width <= 0.0:
-            lines_skipped += 1
-            continue
-
-        population_lower = pop_val
-
-        # Compute continuum limits
-        wcon, wtail = _compute_continuum_limits(
-            ncon=ncon,
-            nelion=nelion,
-            nelionx=nelionx,
-            emerge_val=emerge_val,
-            emerge_h_val=emerge_h_val,
-            metal_tables=metal_tables,
-            ifvac=ifvac,
-        )
-
-        # ALWAYS use catalog gamma values (LINEAR, not normalized)
-        # NO fort.9 metadata dependency for gamma values!
-        gamma_rad = line_gamma_rad_array[line_idx]
-        gamma_stark = line_gamma_stark_array[line_idx]
-        gamma_vdw = line_gamma_vdw_array[line_idx]
-        line_doppler = doppler_width
-
-        # ========== TYPE=1 AUTOIONIZING / STARK (Fortran synthe.for label 700) ==========
-        # KAPPA0 = BSHORE*G*XNFPEL*exp(-ELO*HCKT); KAPPA(ν) = KAPPA0*(ASHORE*ε+BSHORE)/(ε²+1)/BSHORE, ε=2(ν-ν0)/GAMMAR
-        if line_type_code == 1:
-            if rho <= 0.0:
-                lines_skipped += 1
-                continue
-            boltz = boltzmann_factor[line_idx]
-            gf_linear = line_gf_array[line_idx]
-            clamped_idx = max(0, min(center_index, wavelength.size - 1))
-            kappa_min_auto = continuum_row[clamped_idx] * cutoff
-            # Fortran 1078: KAPPA0=BSHORE*G*XNFPEL(NELION); 1080: KAPPA0=KAPPA0*FASTEX(ELO*HCKT(J))
-            # BSHORE=GAMMAW, G=GF. XNFPEL is population (per unit mass in Fortran).
-            xnfpel = pop_val / rho
-            kappa0_auto = gamma_vdw * gf_linear * xnfpel * boltz
-            if kappa0_auto < kappa_min_auto:
-                lines_skipped += 1
-                continue
-            bshore_safe = max(gamma_vdw, 1e-30)
-            gamrad_safe = max(gamma_rad, 1e-30)
-            frelin_hz = 2.99792458e17 / line_wavelength
-            for i in range(wavelength.size):
-                freq_hz_i = 2.99792458e17 / wavelength[i]
-                epsil = 2.0 * (freq_hz_i - frelin_hz) / gamrad_safe
-                kappa_auto = (
-                    kappa0_auto
-                    * (gamma_stark * epsil + gamma_vdw)
-                    / (epsil * epsil + 1.0)
-                    / bshore_safe
-                )
-                if kappa_auto >= continuum_row[i] * cutoff:
-                    tmp_buffer[i] += kappa_auto
-            lines_processed += 1
-            if _xlinop_debug_path is not None and depth_idx in _XLINOP_DEBUG_DEPTHS:
-                for idx in range(wavelength.size):
-                    if not any(
-                        abs(wavelength[idx] - tw) <= _XLINOP_DEBUG_TARGET_TOL
-                        for tw in _XLINOP_DEBUG_TARGET_WAVES
-                    ):
-                        continue
-                    kapmin_bin = float(continuum_row[idx] * cutoff)
-                    if tmp_buffer[idx] > 0.0:
-                        with open(_xlinop_debug_path, "a") as _f:
-                            _f.write(
-                                f"DEBUG XLINOP TARGET TYPE1: J={depth_idx + 1:3d} ILINE={line_idx:7d} TYPE=   1 "
-                                f"WL={line_wavelength:10.4f} WAVE={wavelength[idx]:10.6f} "
-                                f"KAPPA={tmp_buffer[idx]:12.4e} KAPMIN={kapmin_bin:12.4e}\n"
-                            )
-            continue
-
-        # Handle special wing types (simplified - he_solver not available in standalone)
-        if (
-            wing_type == fort19_io.Fort19WingType.AUTOIONIZING
-            and fort19_data is not None
-        ):
-            population = (
-                population_lower
-                if (population_lower is not None and population_lower > 0.0)
-                else None
-            )
-            if population is None:
-                population = boltz
-            gf_value = catalog_gf[line_idx]
-            kappa_auto = gamma_vdw * gf_value * population * boltz
-            if kappa_auto < kappa_min:
-                lines_skipped += 1
-                continue
-            # Skip fort19 profile application in standalone (he_solver not available)
-            # This is a limitation but should be rare
-            lines_skipped += 1
-            continue
-
-        # Compute damping value (ADAMP in Fortran synthe.for line 473)
-        # Fortran: ADAMP = (GAMRF + GAMSF*XNE + GAMWF*TXNXN) / DOPPLE(NELION)
-        # Where GAMRF etc. are NORMALIZED gamma values (divided by 4πν in rgfall.for)
-        # and DOPPLE is dimensionless (v_th/c).
-        #
-        # For tfort.12 catalogs, gamma values are PRE-NORMALIZED by rgfall.for.
-        # The Fortran-exact formula is simply: ADAMP = gamma_total / DOPPLE.
-        dopple = doppler_width / line_wavelength if line_wavelength > 0 else dop_val
-        gamma_total = (
-            gamma_rad + gamma_stark * electron_density_val + gamma_vdw * txnxn_line
-        )
-        damping_value = gamma_total / max(dopple, 1e-40)
-
-        # Apply fort.19 profile if available (simplified - he_solver not available)
-        if fort19_data is not None and line19_idx is not None:
-            # Skip fort19 profiles in standalone mode (he_solver limitation)
-            pass
-
-        # Use JIT kernel directly (bypass wrapper)
-        wcon_val = wcon if wcon is not None else -1.0
-        wtail_val = wtail if wtail is not None else -1.0
-        _accumulate_metal_profile_kernel(
-            tmp_buffer,
-            continuum_row,
-            wavelength,
-            center_index,
-            line_wavelength,
-            kappa0,
-            max(damping_value, 1e-12),
-            line_doppler,
-            cutoff,
-            wcon_val,
-            wtail_val,
-            h0tab,
-            h1tab,
-            h2tab,
-        )
-
-        # Reset center (but only if center_index is within grid)
-        # For lines outside grid, wings are still added but no center to reset
-        if 0 <= center_index < wavelength.size:
-            tmp_buffer[center_index] = 0.0
-        local_wings += tmp_buffer
-        local_sources += tmp_buffer * bnu_row
-        if debug_idx is not None and 0 <= debug_idx < tmp_buffer.size:
-            contrib = float(tmp_buffer[debug_idx])
-            if contrib > 0.0:
-                delta_nm = float(wavelength[debug_idx] - line_wavelength)
-                local_kapmin = float(continuum_row[debug_idx] * cutoff)
-                profile_val = contrib / float(kappa0) if kappa0 > 0.0 else 0.0
-                resolu_val = None
-                v_val = None
-                if 0 <= center_index < wavelength.size and line_wavelength > 0.0:
-                    if center_index < wavelength.size - 1:
-                        ratio = wavelength[center_index + 1] / wavelength[center_index]
-                    elif center_index > 0:
-                        ratio = wavelength[center_index] / wavelength[center_index - 1]
-                    else:
-                        ratio = None
-                    if ratio is not None:
-                        resolu_val = 1.0 / (ratio - 1.0)
-                        dopple_val = line_doppler / line_wavelength
-                        if dopple_val > 0.0:
-                            v_val = abs(debug_idx - center_index) / (
-                                dopple_val * resolu_val
-                            )
-                debug_hits.append(
-                    (
-                        contrib,
-                        float(line_wavelength),
-                        int(line_idx),
-                        str(record.element).strip(),
-                        int(record.ion_stage),
-                        float(kappa0),
-                        float(damping_value),
-                        float(line_doppler),
-                        int(line_type_code),
-                        delta_nm,
-                        local_kapmin,
-                        profile_val,
-                        None if wcon_val < 0.0 else float(wcon_val),
-                        None if wtail_val < 0.0 else float(wtail_val),
-                        bool(center_outside),
-                        int(center_index),
-                        int(debug_idx),
-                        resolu_val,
-                        v_val,
-                    )
-                )
-        lines_processed += 1
-
-    return (
-        depth_idx,
-        local_wings,
-        local_sources,
-        local_helium_wings,
-        local_helium_sources,
-        lines_processed,
-        lines_skipped,
-        debug_idx,
-        debug_hits,
-    )
 
 
 # Numba-compatible atomic mass lookup (element_idx -> atomic_mass)
@@ -3181,41 +2460,6 @@ def run_synthesis(cfg: SynthesisConfig) -> SynthResult:
         np.savez(_stage_dump_path / "stage_1_populations.npz", **_s1)
         logger.info("Stage 1 dump (populations) saved")
 
-        print("\n" + "=" * 70)
-        print("DEBUG: Mass density (RHO) values at different depths")
-        print("=" * 70)
-        sample_depths = [
-            0,
-            atm.layers // 4,
-            atm.layers // 2,
-            3 * atm.layers // 4,
-            atm.layers - 1,
-        ]
-        for depth_idx in sample_depths:
-            if depth_idx < atm.layers:
-                rho_val = float(atm.mass_density[depth_idx])
-                temp_val = float(atm.temperature[depth_idx])
-                press_val = (
-                    float(atm.gas_pressure[depth_idx])
-                    if hasattr(atm, "gas_pressure")
-                    else 0.0
-                )
-                xne_val = (
-                    float(atm.electron_density[depth_idx])
-                    if hasattr(atm, "electron_density")
-                    else 0.0
-                )
-                print(
-                    f"  Depth {depth_idx}: RHO={rho_val:.6e} g/cm³, T={temp_val:.2f} K, P={press_val:.6e}, XNE={xne_val:.6e}"
-                )
-                # Compare with Fortran: XNATOM = P/TK - XNE, where TK = k_B * T
-                if press_val > 0:
-                    tk_val = K_BOLTZ * temp_val
-                    xnatom_approx = press_val / tk_val - xne_val
-                    print(
-                        f"    XNATOM (approx from P/TK-XNE): {xnatom_approx:.6e} cm⁻³"
-                    )
-        print("=" * 70 + "\n")
     asynth_npz: Optional[np.lib.npyio.NpzFile] = None
     fort19_data: Optional[fort19_io.Fort19Data] = None
     # Build or load wavelength grid
@@ -3453,18 +2697,6 @@ def run_synthesis(cfg: SynthesisConfig) -> SynthResult:
     t_line_opacity = time.perf_counter()
     fscat_vec: np.ndarray = np.zeros(atm.layers, dtype=np.float64)
 
-    # CRITICAL DEBUG: Check has_lines value
-    if cfg.debug:
-        print("\n" + "=" * 70)
-        print("CRITICAL DEBUG: Before line opacity computation")
-        print("=" * 70)
-        print(f"has_lines: {has_lines}")
-        print(f"catalog.records length: {len(catalog.records)}")
-        print(f"line_indices length: {len(line_indices)}")
-        if len(line_indices) > 0:
-            print(f"First line index: {line_indices[0]}")
-        print("=" * 70 + "\n")
-
     # Compute line opacity from first principles (no Fortran file dependency)
     if has_lines:
         logger.info(
@@ -3574,21 +2806,6 @@ def run_synthesis(cfg: SynthesisConfig) -> SynthResult:
             )
             logger.info("Stage 4 dump (ASYNTH) saved")
 
-        # CRITICAL DEBUG: Check if asynth is all zeros
-        if cfg.debug:
-            print("\n" + "=" * 70)
-            print("CRITICAL DEBUG: After computing ASYNTH")
-            print("=" * 70)
-            print(f"asynth shape: {asynth.shape}")
-            print(f"asynth non-zero count: {np.count_nonzero(asynth)}")
-            print(f"asynth max: {np.max(asynth):.2e}")
-            print(f"asynth min: {np.min(asynth):.2e}")
-            if np.all(asynth == 0.0):
-                print("ERROR: asynth is ALL ZEROS!")
-            else:
-                print("asynth is NOT all zeros")
-            print("=" * 70 + "\n")
-
         # Apply scattering factor
         rhox = atm.depth
         rhox_scale = cfg.rhoxj_scale
@@ -3606,93 +2823,9 @@ def run_synthesis(cfg: SynthesisConfig) -> SynthResult:
         absorption = asynth * (1.0 - fscat[:, None])
         scattering = asynth * fscat[:, None]
 
-        # CRITICAL DEBUG: Check fscat values
-        if cfg.debug:
-            print("\n" + "=" * 70)
-            print("CRITICAL DEBUG: After computing absorption from ASYNTH")
-            print("=" * 70)
-            print(f"fscat shape: {fscat.shape}")
-            print(f"fscat min: {np.min(fscat):.2e}, max: {np.max(fscat):.2e}")
-            print(f"fscat non-zero count: {np.count_nonzero(fscat)}")
-            print(
-                f"(1.0 - fscat) min: {np.min(1.0 - fscat):.2e}, max: {np.max(1.0 - fscat):.2e}"
-            )
-            print(f"absorption shape: {absorption.shape}")
-            print(f"absorption non-zero count: {np.count_nonzero(absorption)}")
-            print(f"absorption max: {np.max(absorption):.2e}")
-            if np.all(absorption == 0.0):
-                print("ERROR: absorption is ALL ZEROS!")
-                if np.all(asynth == 0.0):
-                    print("  Reason: asynth is all zeros")
-                elif np.all(fscat == 1.0):
-                    print("  Reason: fscat is all 1.0, so (1.0 - fscat) = 0")
-                else:
-                    print(
-                        "  Reason: Unknown - asynth and fscat both have non-zero values"
-                    )
-            else:
-                print("absorption is NOT all zeros")
-            print("=" * 70 + "\n")
-
         buffers.line_opacity[:] = absorption
         # Mark that we're using ASYNTH (computed from catalog)
         buffers._using_asynth = True
-        debug_metal_wave = os.getenv("PY_DEBUG_METAL_WING_WAVE")
-        debug_metal_depth = os.getenv("PY_DEBUG_METAL_WING_DEPTH")
-        if debug_metal_wave and debug_metal_depth:
-            try:
-                debug_wave_val = float(debug_metal_wave)
-                depth_val = int(debug_metal_depth)
-                if depth_val > 0:
-                    depth_idx = depth_val - 1
-                    wl_idx = int(np.argmin(np.abs(wavelength - debug_wave_val)))
-                    print(
-                        "PY_DEBUG_LINE_OPACITY_INIT: "
-                        f"wave={wavelength[wl_idx]:.6f} depth={depth_val} "
-                        f"line_opacity={buffers.line_opacity[depth_idx, wl_idx]:.6e}"
-                    )
-            except ValueError:
-                pass
-        # After line 971: buffers.line_opacity[:] = absorption
-        logger.info(
-            f"Line opacity after ASYNTH: shape {buffers.line_opacity.shape}, "
-            f"non-zero count: {np.count_nonzero(buffers.line_opacity)}, "
-            f"max: {np.max(buffers.line_opacity):.2e}, "
-            f"min (non-zero): {float(np.min(buffers.line_opacity[buffers.line_opacity > 0])) if np.any(buffers.line_opacity > 0) else 0:.2e}"
-        )
-        # CRITICAL DEBUG: Check if absorption is all zeros and analyze large values
-        if cfg.debug:
-            print("\n" + "=" * 70)
-            print(
-                "CRITICAL DEBUG: After setting buffers.line_opacity = absorption (from TRANSP/ASYNTH)"
-            )
-            print("=" * 70)
-            print(f"absorption shape: {absorption.shape}")
-            print(f"absorption non-zero count: {np.count_nonzero(absorption)}")
-            print(f"absorption max: {np.max(absorption):.2e}")
-            absorption_nonzero = (
-                absorption[absorption > 0]
-                if np.any(absorption > 0)
-                else np.array([0.0])
-            )
-            print(f"absorption min (non-zero): {float(np.min(absorption_nonzero)):.2e}")
-            print(
-                f"absorption mean (non-zero): {float(np.mean(absorption_nonzero)):.2e}"
-            )
-            print(
-                f"absorption median (non-zero): {float(np.median(absorption_nonzero)):.2e}"
-            )
-            print(f"Values > 1e10: {np.sum(absorption > 1e10):,}")
-            print(f"Values > 1e20: {np.sum(absorption > 1e20):,}")
-            print(f"Values > 1e24: {np.sum(absorption > 1e24):,}")
-        # CRITICAL FIX: Match Fortran exactly - no clamping of line opacity
-        # Fortran does NOT clamp ASYNTH/ALINE values - it uses them directly
-        # Remove clamping to match Fortran behavior exactly
-        if cfg.debug and np.any(absorption > 1e10):
-            n_overflow = np.sum(absorption > 1e10)
-            print(
-                f"  WARNING: {n_overflow:,} values exceed 1e10 (for diagnostic only, not clamping)"
-            )
 
         # Check for NaN and Inf values (can occur from division by zero or overflow)
         nan_mask = np.isnan(absorption)
@@ -3707,17 +2840,6 @@ def run_synthesis(cfg: SynthesisConfig) -> SynthResult:
                 f"  WARNING: {n_inf:,} Inf values found in absorption, clamping to MAX_OPACITY"
             )
             absorption[inf_mask] = MAX_OPACITY
-
-        if cfg.debug:
-            print(
-                f"buffers.line_opacity non-zero count: {np.count_nonzero(buffers.line_opacity)}"
-            )
-            print(f"buffers.line_opacity max: {np.max(buffers.line_opacity):.2e}")
-            if np.all(absorption == 0.0):
-                print("ERROR: absorption is ALL ZEROS!")
-            else:
-                print("absorption is NOT all zeros")
-            print("=" * 70 + "\n")
 
         # Assign absorption to line_opacity (with overflow protection applied)
         buffers.line_opacity[:] = absorption
@@ -3737,35 +2859,6 @@ def run_synthesis(cfg: SynthesisConfig) -> SynthResult:
         metal_sources = np.zeros_like(buffers.line_opacity)
         helium_wings = np.zeros_like(buffers.line_opacity)
         helium_sources = np.zeros_like(buffers.line_opacity)
-
-    # CRITICAL DEBUG: Check buffers.line_opacity before copying to abs_core_base
-    if cfg.debug:
-        print("\n" + "=" * 70)
-        print("CRITICAL DEBUG: Before abs_core_base = buffers.line_opacity.copy()")
-        print("=" * 70)
-        print(f"buffers.line_opacity shape: {buffers.line_opacity.shape}")
-        print(
-            f"buffers.line_opacity non-zero count: {np.count_nonzero(buffers.line_opacity)}"
-        )
-        print(f"buffers.line_opacity max: {np.max(buffers.line_opacity):.2e}")
-        print(
-            f"buffers.line_opacity min (non-zero): {float(np.min(buffers.line_opacity[buffers.line_opacity > 0])) if np.any(buffers.line_opacity > 0) else 0:.2e}"
-        )
-        # Check first few wavelengths specifically
-        print(f"\nFirst 10 wavelengths (first 5 depths):")
-        for wl_idx in range(min(10, wavelength.size)):
-            wl = wavelength[wl_idx]
-            line_op_wl = buffers.line_opacity[:, wl_idx]
-            non_zero_depths = np.sum(line_op_wl > 0)
-            max_val = np.max(line_op_wl)
-            print(
-                f"  Wavelength {wl:.8f} nm (idx {wl_idx}): max={max_val:.2e}, non-zero depths={non_zero_depths}/{atm.layers}"
-            )
-            if max_val > 0:
-                print(
-                    f"    Surface value: {line_op_wl[0]:.2e}, Deep value: {line_op_wl[-1]:.2e}"
-                )
-        print("=" * 70 + "\n")
 
     abs_core_base = buffers.line_opacity.copy()
     with np.errstate(divide="ignore"):
@@ -3797,23 +2890,6 @@ def run_synthesis(cfg: SynthesisConfig) -> SynthResult:
             logger.info("Skipping hydrogen wings (--skip-hydrogen-wings)")
         ahline = np.zeros_like(buffers.line_opacity)
         shline = np.zeros_like(buffers.line_opacity)
-
-    # Optional debug: report hydrogen vs metal contributions at a target wavelength.
-    debug_wave = os.getenv("PY_DEBUG_WAVE")
-    if debug_wave:
-        try:
-            target_wave = float(debug_wave)
-        except ValueError:
-            target_wave = None
-        if target_wave is not None and wavelength.size > 0:
-            idx_target = int(np.argmin(np.abs(wavelength - target_wave)))
-            for depth_idx in (0, 19, 39, 59, 79):
-                if depth_idx < ahline.shape[0]:
-                    print(
-                        f"PY_DEBUG_COMPONENTS depth {depth_idx + 1}: "
-                        f"AHLINE={float(ahline[depth_idx, idx_target]):.6e} "
-                        f"ASYNTH_METAL={float(buffers.line_opacity[depth_idx, idx_target]):.6e}"
-                    )
 
     # Ensure hydrogen lines are represented in the line opacity used by radiative transfer.
     # Fortran XLINOP adds hydrogen profiles directly into ASYNTH before SPECTRV applies FSCAT.
@@ -3931,19 +3007,6 @@ def run_synthesis(cfg: SynthesisConfig) -> SynthResult:
         else:
             logger.info(f"Using {n_workers_metal} workers (from config)")
 
-        # Optional XLINOP target debug (Fortran 9060: J, ILINE, TYPE, WL, WAVE, KAPPA, KAPMIN, NELION, NCON, ELO, GF, ADAMP)
-        _xlinop_debug_path = None
-        logger.info("XLINOP target debug enabled: %s", _xlinop_debug_path)
-        if os.getenv("PY_DEBUG_XLINOP_TARGET", "") == "1":
-            _stem = cfg.atmosphere.model_path.stem.replace(".npz", "").replace(".atm", "")
-            _out_dir = Path("results/validation_100")
-            _out_dir.mkdir(parents=True, exist_ok=True)
-            _xlinop_debug_path = _out_dir / f"debug_xlinop_target_{_stem}.txt"
-            with open(_xlinop_debug_path, "w") as _f:
-                _f.write(
-                    "# PY_DEBUG_XLINOP_TARGET: J ILINE TYPE WL WAVE KAPPA KAPMIN NELION NCON ELO GF ADAMP (matches Fortran 9060)\n"
-                )
-
         # Use Numba parallel for metal wings when we have enough layers
         use_numba_parallel = atm.layers >= 10
         use_parallel = use_numba_parallel
@@ -3955,40 +3018,6 @@ def run_synthesis(cfg: SynthesisConfig) -> SynthResult:
                     "Helium wings will be computed sequentially; using Numba parallel kernel for metal wings."
                 )
 
-        # Prepare arguments for standalone processing (shared by metal/helium parallel paths)
-        debug_wave_val = None
-        debug_depth_val = None
-        debug_top_n = 20
-        debug_line_val = None
-        debug_line_eps = 1e-3
-        debug_line_filter = os.getenv("PY_DEBUG_METAL_WING_FILTER") == "1"
-        debug_wave = os.getenv("PY_DEBUG_METAL_WING_WAVE")
-        debug_depth = os.getenv("PY_DEBUG_METAL_WING_DEPTH")
-        debug_top = os.getenv("PY_DEBUG_METAL_WING_TOP")
-        debug_line = os.getenv("PY_DEBUG_METAL_WING_LINE")
-        debug_line_tol = os.getenv("PY_DEBUG_METAL_WING_LINE_TOL")
-        if debug_wave and debug_depth:
-            try:
-                debug_wave_val = float(debug_wave)
-                debug_depth_val = int(debug_depth)
-            except ValueError:
-                debug_wave_val = None
-                debug_depth_val = None
-        if debug_top:
-            try:
-                debug_top_n = max(1, int(debug_top))
-            except ValueError:
-                debug_top_n = 20
-        if debug_line:
-            try:
-                debug_line_val = float(debug_line)
-            except ValueError:
-                debug_line_val = None
-        if debug_line_tol:
-            try:
-                debug_line_eps = float(debug_line_tol)
-            except ValueError:
-                debug_line_eps = 1e-3
         step1_wing_hoist = os.getenv("PY_OPT_STEP1_WING_HOIST", "1") != "0"
         record_elements_upper = [str(r.element).strip().upper() for r in catalog.records]
         record_ion_stage = np.asarray([int(r.ion_stage) for r in catalog.records], dtype=np.int16)
@@ -3996,61 +3025,6 @@ def run_synthesis(cfg: SynthesisConfig) -> SynthResult:
             [int(getattr(r, "line_type", 0) or 0) for r in catalog.records],
             dtype=np.int16,
         )
-
-        def _build_process_args(skip_helium_flag: bool, skip_metals_flag: bool) -> list:
-            args = []
-            for depth_idx in pops.layers.keys():
-                state = pops.layers[depth_idx]
-                continuum_row = buffers.continuum[depth_idx]
-                bnu_row = bnu[depth_idx]
-
-                # Extract scalar values for this depth
-                args_tuple = (
-                    depth_idx,
-                    None,  # state_dict - will reconstruct from values
-                    continuum_row,
-                    wavelength,
-                    line_indices,
-                    catalog.wavelength,
-                    catalog.gf,
-                    catalog.gamma_rad,
-                    catalog.gamma_stark,
-                    catalog.gamma_vdw,
-                    catalog.records,
-                    metadata,  # May not be picklable - will handle
-                    fort19_data,  # May not be picklable - will handle
-                    catalog_to_meta,
-                    catalog_to_fort19,
-                    state.electron_density,
-                    emerge[depth_idx],
-                    emerge_h[depth_idx],
-                    _layer_value(xnf_h_arr, depth_idx),
-                    _layer_value(xnf_he1_arr, depth_idx),
-                    _layer_value(xnf_h2_arr, depth_idx),
-                    atm.temperature[depth_idx],
-                    (
-                        atm.mass_density[depth_idx]
-                        if hasattr(atm, "mass_density") and atm.mass_density is not None
-                        else 1.0
-                    ),
-                    state.txnxn,
-                    state.boltzmann_factor,
-                    metal_tables,
-                    population_cache,
-                    1,
-                    cfg.cutoff,
-                    bnu_row,
-                    skip_helium_flag,
-                    skip_metals_flag,
-                    debug_wave_val,
-                    debug_depth_val,
-                    debug_top_n,
-                    debug_line_val,
-                    debug_line_eps,
-                    debug_line_filter,
-                )
-                args.append(args_tuple)
-            return args
 
         if use_numba_parallel:
             logger.info(
@@ -4084,8 +3058,6 @@ def run_synthesis(cfg: SynthesisConfig) -> SynthResult:
                 local_sources = _EMPTY_FLOAT64
             local_helium_wings = np.zeros_like(wavelength, dtype=np.float64)
             local_helium_sources = np.zeros_like(wavelength, dtype=np.float64)
-            debug_hits = []
-            debug_idx = None
             helium_pass_line_iter = 0
             helium_pass_is_helium = 0
             helium_pass_nonhelium_skips = 0
@@ -4097,21 +3069,6 @@ def run_synthesis(cfg: SynthesisConfig) -> SynthResult:
             helium_fallback_time_ms = 0.0
             helium_tmp_fill_time_ms = 0.0
             helium_add_time_ms = 0.0
-            if step1_wing_hoist:
-                if debug_wave_val is not None and debug_depth_val is not None:
-                    if debug_depth_val == depth_idx + 1:
-                        debug_idx = int(np.argmin(np.abs(wavelength - debug_wave_val)))
-            else:
-                debug_wave = os.getenv("PY_DEBUG_METAL_WING_WAVE")
-                debug_depth = os.getenv("PY_DEBUG_METAL_WING_DEPTH")
-                if debug_wave and debug_depth:
-                    try:
-                        debug_wave_local = float(debug_wave)
-                        debug_depth_local = int(debug_depth)
-                        if debug_depth_local == depth_idx + 1:
-                            debug_idx = int(np.argmin(np.abs(wavelength - debug_wave_local)))
-                    except ValueError:
-                        debug_idx = None
 
             lines_processed = 0
             lines_skipped = 0
@@ -4135,30 +3092,8 @@ def run_synthesis(cfg: SynthesisConfig) -> SynthResult:
             if helium_only:
                 helium_pass_line_iter = int(len(line_iter))
 
-            xlinop_target_indices = []
-            if (
-                _xlinop_debug_path is not None
-                and depth_idx in _XLINOP_DEBUG_DEPTHS
-                and include_metals
-            ):
-                xlinop_target_indices = [
-                    i
-                    for i in range(wavelength.size)
-                    if any(
-                        abs(wavelength[i] - tw) <= _XLINOP_DEBUG_TARGET_TOL
-                        for tw in _XLINOP_DEBUG_TARGET_WAVES
-                    )
-                ]
-
             for line_idx in line_iter:
                 center_index = line_indices[int(line_idx)]
-                if (
-                    debug_line_filter
-                    and debug_line_val is not None
-                    and abs(catalog_wavelength[line_idx] - debug_line_val)
-                    > debug_line_eps
-                ):
-                    continue
                 # CRITICAL FIX: Match Fortran synthe.for line 301 EXACTLY
                 # IF(NBUFF.LT.1.OR.NBUFF.GT.LENGTH)GO TO 320
                 # Fortran SKIPS lines whose centers are outside the grid
@@ -4360,18 +3295,6 @@ def run_synthesis(cfg: SynthesisConfig) -> SynthResult:
 
                     # First check (Fortran line 267)
                     if kappa0_pre < kappa_min or doppler_width <= 0.0:
-                        if (
-                            debug_line_val is not None
-                            and debug_depth_val is not None
-                            and debug_depth_val == depth_idx + 1
-                            and abs(line_wavelength - debug_line_val) <= debug_line_eps
-                        ):
-                            print(
-                                "PY_DEBUG_METAL_WING_SKIP_PRE: "
-                                f"wl={line_wavelength:.6f} depth={depth_idx + 1} "
-                                f"kappa0_pre={kappa0_pre:.6e} kappa_min={kappa_min:.6e} "
-                                f"center_outside={center_outside}"
-                            )
                         lines_skipped += 1
                         continue
 
@@ -4381,18 +3304,6 @@ def run_synthesis(cfg: SynthesisConfig) -> SynthResult:
                     # Second check (Fortran line 272): post-Boltzmann cutoff
                     # RE-ENABLED: This matches Fortran behavior
                     if kappa0 < kappa_min:
-                        if (
-                            debug_line_val is not None
-                            and debug_depth_val is not None
-                            and debug_depth_val == depth_idx + 1
-                            and abs(line_wavelength - debug_line_val) <= debug_line_eps
-                        ):
-                            print(
-                                "PY_DEBUG_METAL_WING_SKIP_POST: "
-                                f"wl={line_wavelength:.6f} depth={depth_idx + 1} "
-                                f"kappa0={kappa0:.6e} kappa_min={kappa_min:.6e} "
-                                f"center_outside={center_outside}"
-                            )
                         lines_skipped += 1
                         continue
 
@@ -4559,22 +3470,6 @@ def run_synthesis(cfg: SynthesisConfig) -> SynthResult:
                         if profile_consumed:
                             helium_profile_consumed += 1
                 if profile_consumed:
-                    if debug_idx is not None and 0 <= debug_idx < tmp_buffer.size:
-                        contrib = float(tmp_buffer[debug_idx])
-                        if contrib > 0.0:
-                            debug_hits.append(
-                                (
-                                    contrib,
-                                    float(line_wavelength),
-                                    int(line_idx),
-                                    element_symbol,
-                                    int(record.ion_stage),
-                                    float(kappa0),
-                                    float(damping_value),
-                                    float(line_doppler),
-                                    int(line_type_code),
-                                )
-                            )
                     lines_processed += 1
                     continue
 
@@ -4589,15 +3484,6 @@ def run_synthesis(cfg: SynthesisConfig) -> SynthResult:
                     else:
                         tmp_buffer.fill(0.0)
                     precleared_tmp = True
-                buf_before_xlinop = None
-                if (
-                    _xlinop_debug_path is not None
-                    and depth_idx in _XLINOP_DEBUG_DEPTHS
-                    and xlinop_target_indices
-                    and include_metals
-                    and not helium_only
-                ):
-                    buf_before_xlinop = np.copy(tmp_buffer)
                 _fallback_t0 = time.perf_counter()
                 _accumulate_metal_profile(
                     buffer=tmp_buffer,
@@ -4612,27 +3498,6 @@ def run_synthesis(cfg: SynthesisConfig) -> SynthResult:
                     wcon=wcon,
                     wtail=wtail,
                 )
-                if (
-                    _xlinop_debug_path is not None
-                    and depth_idx in _XLINOP_DEBUG_DEPTHS
-                    and xlinop_target_indices
-                    and buf_before_xlinop is not None
-                ):
-                    elo = float(getattr(record, "excitation_energy", 0.0))
-                    gf_val = float(catalog.gf[line_idx])
-                    for idx in xlinop_target_indices:
-                        delta = float(tmp_buffer[idx] - buf_before_xlinop[idx])
-                        if delta > 0.0:
-                            wave_bin = float(wavelength[idx])
-                            kapmin_bin = float(continuum_row[idx] * cfg.cutoff)
-                            with open(_xlinop_debug_path, "a") as _f:
-                                _f.write(
-                                    f"DEBUG XLINOP TARGET: J={depth_idx + 1:3d} ILINE={line_idx:7d} TYPE={line_type_code:4d} "
-                                    f"WL={line_wavelength:10.4f} WAVE={wave_bin:10.6f} "
-                                    f"KAPPA={delta:12.4e} KAPMIN={kapmin_bin:12.4e} "
-                                    f"NELION={record.ion_stage:4d} NCON={0:4d} "
-                                    f"ELO={elo:12.4e} GF={gf_val:12.4e} ADAMP={max(damping_value, 1e-12):12.4e}\n"
-                                )
                 if helium_only:
                     helium_fallback_calls += 1
                     helium_fallback_time_ms += (
@@ -4653,127 +3518,8 @@ def run_synthesis(cfg: SynthesisConfig) -> SynthResult:
                 else:
                     local_wings += tmp_buffer
                     local_sources += tmp_buffer * bnu[depth_idx]
-                if debug_idx is not None and 0 <= debug_idx < tmp_buffer.size:
-                    contrib = float(tmp_buffer[debug_idx])
-                    if contrib > 0.0:
-                        delta_nm = float(wavelength[debug_idx] - line_wavelength)
-                        local_kapmin = float(continuum_row[debug_idx] * cfg.cutoff)
-                        profile_val = contrib / float(kappa0) if kappa0 > 0.0 else 0.0
-                        resolu_val = None
-                        v_val = None
-                        if (
-                            0 <= center_index < wavelength.size
-                            and line_wavelength > 0.0
-                        ):
-                            if center_index < wavelength.size - 1:
-                                ratio = (
-                                    wavelength[center_index + 1]
-                                    / wavelength[center_index]
-                                )
-                            elif center_index > 0:
-                                ratio = (
-                                    wavelength[center_index]
-                                    / wavelength[center_index - 1]
-                                )
-                            else:
-                                ratio = None
-                            if ratio is not None:
-                                resolu_val = 1.0 / (ratio - 1.0)
-                                dopple_val = line_doppler / line_wavelength
-                                if dopple_val > 0.0:
-                                    v_val = abs(debug_idx - center_index) / (
-                                        dopple_val * resolu_val
-                                    )
-                        debug_hits.append(
-                            (
-                                contrib,
-                                float(line_wavelength),
-                                int(line_idx),
-                                element_symbol,
-                                int(record.ion_stage),
-                                float(kappa0),
-                                float(damping_value),
-                                float(line_doppler),
-                                int(line_type_code),
-                                delta_nm,
-                                local_kapmin,
-                                profile_val,
-                                float(wcon) if wcon is not None else None,
-                                float(wtail) if wtail is not None else None,
-                                bool(center_outside),
-                                int(center_index),
-                                int(debug_idx),
-                                resolu_val,
-                                v_val,
-                            )
-                        )
                 lines_processed += 1
 
-            if debug_idx is not None and debug_hits:
-                debug_hits.sort(reverse=True, key=lambda item: item[0])
-                target_wave = float(wavelength[debug_idx])
-                print(
-                    f"PY_DEBUG_METAL_WING_SUM: wave={target_wave:.6f} depth={depth_idx + 1} "
-                    f"hits={len(debug_hits)}"
-                )
-                for item in debug_hits[:debug_top_n]:
-                    if len(item) == 9:
-                        (
-                            contrib,
-                            wl_line,
-                            line_id,
-                            elem,
-                            ion_stage,
-                            kappa0_val,
-                            adamp_val,
-                            dop_val,
-                            line_type,
-                        ) = item
-                        print(
-                            "  hit "
-                            f"contrib={contrib:.6e} wl={wl_line:.6f} "
-                            f"line={line_id} elem={elem} ion={ion_stage} "
-                            f"kappa0={kappa0_val:.6e} adamp={adamp_val:.6e} "
-                            f"doppler={dop_val:.6e} type={line_type} "
-                            "delta=NA kapmin=NA profile=NA wcon=NA wtail=NA "
-                            "center_outside=NA center_idx=NA hit_idx=NA istep=NA "
-                            "resolu=NA v=NA"
-                        )
-                        continue
-                    (
-                        contrib,
-                        wl_line,
-                        line_id,
-                        elem,
-                        ion_stage,
-                        kappa0_val,
-                        adamp_val,
-                        dop_val,
-                        line_type,
-                        delta_nm,
-                        local_kapmin,
-                        profile_val,
-                        wcon_val,
-                        wtail_val,
-                        center_outside_val,
-                        center_index_val,
-                        debug_idx_val,
-                        resolu_val,
-                        v_val,
-                    ) = item
-                    print(
-                        "  hit "
-                        f"contrib={contrib:.6e} wl={wl_line:.6f} "
-                        f"line={line_id} elem={elem} ion={ion_stage} "
-                        f"kappa0={kappa0_val:.6e} adamp={adamp_val:.6e} "
-                        f"doppler={dop_val:.6e} type={line_type} "
-                        f"delta={delta_nm:.6e} kapmin={local_kapmin:.6e} "
-                        f"profile={profile_val:.6e} wcon={wcon_val} "
-                        f"wtail={wtail_val} center_outside={center_outside_val} "
-                        f"center_idx={center_index_val} hit_idx={debug_idx_val} "
-                        f"istep={debug_idx_val - center_index_val} "
-                        f"resolu={resolu_val} v={v_val}"
-                    )
             # Return results (no locks needed - each depth writes to different indices)
             return (
                 depth_idx,
@@ -5255,32 +4001,6 @@ def run_synthesis(cfg: SynthesisConfig) -> SynthResult:
         # No lines - wings are already zero
         logger.info("No lines - skipping metal wings")
 
-    debug_metal_wave = os.getenv("PY_DEBUG_METAL_WING_WAVE")
-    debug_metal_depth = os.getenv("PY_DEBUG_METAL_WING_DEPTH")
-    if debug_metal_wave and debug_metal_depth:
-        try:
-            debug_wave_val = float(debug_metal_wave)
-            depth_val = int(debug_metal_depth)
-            if depth_val > 0:
-                depth_idx = depth_val - 1
-                wl_idx = int(np.argmin(np.abs(wavelength - debug_wave_val)))
-                fscat_val = (
-                    float(fscat_vec[depth_idx]) if depth_idx < fscat_vec.size else 0.0
-                )
-                alinec_val = float(alinec_total[depth_idx, wl_idx])
-                helium_val = float(helium_wings[depth_idx, wl_idx])
-                print(
-                    "PY_DEBUG_METAL_WING: "
-                    f"wave={wavelength[wl_idx]:.6f} depth={depth_val} "
-                    f"abs_core={abs_core_base[depth_idx, wl_idx]:.6e} "
-                    f"metal_wings={metal_wings[depth_idx, wl_idx]:.6e} "
-                    f"helium_wings={helium_val:.6e} "
-                    f"line_opacity={buffers.line_opacity[depth_idx, wl_idx]:.6e} "
-                    f"alinec_total={alinec_val:.6e} fscat={fscat_val:.6e}"
-                )
-        except ValueError:
-            pass
-
     # --- line source reconstruction -------------------------------------------------
     # Reuse AHLINE computed above; this avoids a second expensive pass with
     # identical inputs and preserves behavior.
@@ -5655,76 +4375,6 @@ def run_synthesis(cfg: SynthesisConfig) -> SynthResult:
         logger.info(
             f"  Total opacity (surface): {float(cont_abs[0, idx_check] + buffers.line_opacity[0, idx_check]):.6E}"
         )
-
-    debug_wave = os.getenv("PY_DEBUG_WAVE")
-    if debug_wave:
-        try:
-            target_wave = float(debug_wave)
-        except ValueError:
-            target_wave = None
-        if (
-            target_wave is not None
-            and wavelength.size > 0
-            and cont_abs.shape[1] == wavelength.size
-        ):
-            idx_target = int(np.argmin(np.abs(wavelength - target_wave)))
-            print(
-                f"PY_DEBUG_WAVE: requested {target_wave:.6f} nm, nearest {float(wavelength[idx_target]):.6f} nm (idx={idx_target})"
-            )
-            debug_depths = os.getenv("PY_DEBUG_WAVE_DEPTHS")
-            if debug_depths:
-                depth_list = []
-                for item in debug_depths.split(","):
-                    item = item.strip()
-                    if not item:
-                        continue
-                    try:
-                        depth_val = int(item)
-                    except ValueError:
-                        continue
-                    if depth_val > 0:
-                        depth_list.append(depth_val - 1)
-            else:
-                depth_list = [0, 19, 39, 59, 79]
-            for depth_idx in depth_list:
-                if 0 <= depth_idx < cont_abs.shape[0]:
-                    line_val = float(buffers.line_opacity[depth_idx, idx_target])
-                    cont_val = float(cont_abs[depth_idx, idx_target])
-                    line_scat_val = float(
-                        buffers.line_scattering[depth_idx, idx_target]
-                    )
-                    cont_scat_val = float(cont_scat[depth_idx, idx_target])
-                    asynth_val = (
-                        float(asynth[depth_idx, idx_target])
-                        if "asynth" in locals()
-                        else float("nan")
-                    )
-                    fscat_val = (
-                        float(fscat_vec[depth_idx])
-                        if "fscat_vec" in locals()
-                        else float("nan")
-                    )
-                    print(
-                        f"PY_DEBUG_WAVE depth {depth_idx + 1}: ALINE={line_val:.6e} "
-                        f"ACONT={cont_val:.6e} ALINE/ACONT={line_val / max(cont_val, 1e-40):.6e} "
-                        f"SIGMAL={line_scat_val:.6e} SIGMAC={cont_scat_val:.6e}"
-                    )
-                    print(
-                        f"  ASYNTH={asynth_val:.6e} FSCAT={fscat_val:.6e} "
-                        f"(1-FSCAT)={1.0 - fscat_val:.6e}"
-                    )
-            if os.getenv("PY_DEBUG_ABTOT_FULL") == "1":
-                dump_path = os.getenv("PY_DEBUG_ABTOT_PATH")
-                if not dump_path:
-                    dump_path = f"out/abtot_{float(wavelength[idx_target]):.6f}.npz"
-                np.savez(
-                    dump_path,
-                    acont=cont_abs[:, idx_target],
-                    aline=buffers.line_opacity[:, idx_target],
-                    sigmac=cont_scat[:, idx_target],
-                    sigmal=buffers.line_scattering[:, idx_target],
-                )
-                print(f"PY_DEBUG_ABTOT_FULL: wrote {dump_path}")
 
     # Determine number of workers for parallel processing
     n_workers = cfg.n_workers

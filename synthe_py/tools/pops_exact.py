@@ -40,50 +40,15 @@ _TRACE_PFSAHA_WRAPPER = os.environ.get(
 ).strip().lower() in ("1", "true")
 _PFSAHA_WRAPPER_TRACE_PATH: Optional[Path] = None
 
-# Targeted PFSAHA trace for Mo (Z=42) to debug mid-layer population mismatch.
-_TRACE_PFSAHA_MO = os.getenv("PY_TRACE_PFSAHA_MO", "").strip() in {
-    "1",
-    "T",
-    "t",
-    "Y",
-    "y",
-}
+_TRACE_PFSAHA_MO = False
 _PFSAHA_MO_TRACE_PATH: Optional[Path] = None
-
-# Targeted PFSAHA trace for Si (Z=14) to debug upper-layer population mismatch.
-_TRACE_PFSAHA_SI = os.getenv("PY_TRACE_PFSAHA_SI", "").strip() in {
-    "1",
-    "T",
-    "t",
-    "Y",
-    "y",
-}
+_TRACE_PFSAHA_SI = False
 _PFSAHA_SI_TRACE_PATH: Optional[Path] = None
-_TRACE_PFSAHA_SI_COMPARE = os.getenv("PY_TRACE_PFSAHA_SI_COMPARE", "").strip() in {
-    "1",
-    "T",
-    "t",
-    "Y",
-    "y",
-}
+_TRACE_PFSAHA_SI_COMPARE = False
 _PFSAHA_SI_COMPARE_PATH: Optional[Path] = None
-_TRACE_PFSAHA_K = os.getenv("PY_TRACE_PFSAHA_K", "").strip() in {
-    "1",
-    "T",
-    "t",
-    "Y",
-    "y",
-}
+_TRACE_PFSAHA_K = False
 _PFSAHA_K_TRACE_PATH: Optional[Path] = None
-
-# Targeted PFSAHA trace for Na (Z=11) to debug NMOLEC MODE=12 calls.
-_TRACE_PFSAHA_NA = os.getenv("PY_TRACE_PFSAHA_NA", "").strip() in {
-    "1",
-    "T",
-    "t",
-    "Y",
-    "y",
-}
+_TRACE_PFSAHA_NA = False
 _PFSAHA_NA_TRACE_PATH: Optional[Path] = None
 
 

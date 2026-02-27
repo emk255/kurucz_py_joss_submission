@@ -736,20 +736,8 @@ def compute_transp(
     DEBUG_WL_MIN = 299.5  # nm
     DEBUG_WL_MAX = 300.5  # nm
 
-    debug_transp_wl = os.getenv("PY_DEBUG_TRANSP_WL")
-    debug_transp_depth = os.getenv("PY_DEBUG_TRANSP_DEPTH")
-    debug_transp_tol = float(os.getenv("PY_DEBUG_TRANSP_TOL", "2e-4"))
     debug_transp_wl_val = None
     debug_transp_depth_idx = None
-    if debug_transp_wl and debug_transp_depth:
-        try:
-            debug_transp_wl_val = float(debug_transp_wl)
-            depth_val = int(debug_transp_depth)
-            if depth_val > 0:
-                debug_transp_depth_idx = depth_val - 1
-        except ValueError:
-            debug_transp_wl_val = None
-            debug_transp_depth_idx = None
 
     include_h_lines = os.getenv("PY_INCLUDE_H_LINES") == "1"
 
@@ -1135,42 +1123,6 @@ def compute_asynth_from_transp(
                         line_idx, depth_idx
                     ]
 
-    debug_wave = os.getenv("PY_DEBUG_ASYNTH_WAVE")
-    debug_depth = os.getenv("PY_DEBUG_ASYNTH_DEPTH")
-    if debug_wave and debug_depth:
-        try:
-            target_wave = float(debug_wave)
-            target_depth = int(debug_depth) - 1
-        except ValueError:
-            target_wave = None
-            target_depth = -1
-        if (
-            target_wave is not None
-            and 0 <= target_depth < n_depths
-            and n_wavelengths > 0
-        ):
-            idx_target = int(np.argmin(np.abs(wavelength_grid - target_wave)))
-            center_mask = line_indices == idx_target
-            center_transp = transp[center_mask, target_depth]
-            sum_center = float(np.sum(center_transp)) if center_transp.size else 0.0
-            min_center = float(np.min(center_transp)) if center_transp.size else 0.0
-            neg_count = int(np.sum(center_transp < 0.0)) if center_transp.size else 0
-            print(
-                f"PY_DEBUG_ASYNTH: wave={float(wavelength_grid[idx_target]):.6f} "
-                f"depth={target_depth + 1} center lines={center_transp.size} "
-                f"sum_transp={sum_center:.6e} min_transp={min_center:.6e} "
-                f"neg_count={neg_count}"
-            )
-            if neg_count > 0:
-                neg_idx = np.where(center_mask)[0][center_transp < 0.0]
-                for line_i in neg_idx[:10]:
-                    rec = catalog.records[int(line_i)]
-                    print(
-                        f"  NEG TRANSP line: wl={float(rec.wavelength):.6f} "
-                        f"loggf={float(rec.log_gf):.3f} "
-                        f"transp={float(transp[line_i, target_depth]):.6e}"
-                    )
-
     # Pre-compute arrays for JIT kernel
     if True:
         # Pre-compute kappa0, adamp, doppler_widths, gamma values, wcon, wtail for all lines/depths
@@ -1364,10 +1316,10 @@ def compute_asynth_from_transp(
                             wtail_array[idx_wcon] = wtail
 
         # Optional debug: inspect wing reach for a specific line/wave/depth.
-        debug_line_wl = os.getenv("PY_DEBUG_WING_LINE_WL")
-        debug_line_depth = os.getenv("PY_DEBUG_WING_LINE_DEPTH")
-        debug_target_wave = os.getenv("PY_DEBUG_WING_TARGET_WAVE")
-        if debug_line_wl and debug_line_depth and debug_target_wave:
+        debug_line_wl = None
+        debug_line_depth = None
+        debug_target_wave = None
+        if False and debug_line_wl and debug_line_depth and debug_target_wave:
             try:
                 line_wl_val = float(debug_line_wl)
                 depth_val = int(debug_line_depth) - 1
@@ -1422,7 +1374,7 @@ def compute_asynth_from_transp(
                 else:
                     maxstep_dbg = 0
                 offset_dbg = abs(center_idx_dbg - target_idx_dbg)
-                min_profile_dbg = float(os.getenv("PY_DEBUG_WING_MIN_PROFILE", "1e-6"))
+                min_profile_dbg = 1e-6
                 profile_at_offset = 0.0
                 if offset_dbg > 0 and dopple_dbg > 0.0:
                     if adamp_dbg < 0.2:
@@ -1472,9 +1424,9 @@ def compute_asynth_from_transp(
         line_wavelengths_array = np.asarray(catalog.wavelength, dtype=np.float64)
         line_indices_array = np.asarray(line_indices_wing, dtype=np.int64)
 
-        debug_wave = os.getenv("PY_DEBUG_ASYNTH_WAVE")
-        debug_depth = os.getenv("PY_DEBUG_ASYNTH_DEPTH")
-        if debug_wave and debug_depth:
+        debug_wave = None
+        debug_depth = None
+        if False and debug_wave and debug_depth:
             try:
                 target_wave = float(debug_wave)
                 target_depth = int(debug_depth) - 1
@@ -1540,9 +1492,9 @@ def compute_asynth_from_transp(
         max_profile_steps = int(MAX_PROFILE_STEPS)
         debug_idx = -1
         debug_depth = -1
-        debug_wave_env = os.getenv("PY_DEBUG_ASYNTH_WAVE")
-        debug_depth_env = os.getenv("PY_DEBUG_ASYNTH_DEPTH")
-        if debug_wave_env and debug_depth_env:
+        debug_wave_env = None
+        debug_depth_env = None
+        if False and debug_wave_env and debug_depth_env:
             try:
                 debug_idx = int(
                     np.argmin(np.abs(wavelength_grid - float(debug_wave_env)))
@@ -1551,7 +1503,7 @@ def compute_asynth_from_transp(
             except ValueError:
                 debug_idx = -1
                 debug_depth = -1
-        debug_line_env = os.getenv("PY_DEBUG_ASYNTH_LINE")
+        debug_line_env = None
         if debug_line_env and debug_idx >= 0 and 0 <= debug_depth < n_depths:
             try:
                 debug_line_idx = int(debug_line_env)
@@ -1619,8 +1571,8 @@ def compute_asynth_from_transp(
                     f"taper={taper_factor:.6e}"
                 )
 
-        debug_top_env = os.getenv("PY_DEBUG_ASYNTH_TOP")
-        debug_type_env = os.getenv("PY_DEBUG_ASYNTH_TYPE")
+        debug_top_env = None
+        debug_type_env = None
         if (
             debug_top_env
             and debug_idx >= 0
@@ -1751,7 +1703,7 @@ def compute_asynth_from_transp(
                 )
 
         use_wcon_debug = wcon_array.size > 0
-        debug_wing_wave_env = os.getenv("PY_DEBUG_WING_WAVE")
+        debug_wing_wave_env = None
         if debug_wing_wave_env and n_wavelengths > 0:
             try:
                 debug_wing_wave = float(debug_wing_wave_env)
@@ -1760,7 +1712,7 @@ def compute_asynth_from_transp(
             if debug_wing_wave is not None:
                 idx_target = int(np.argmin(np.abs(wavelength_grid - debug_wing_wave)))
                 wave_target = float(wavelength_grid[idx_target])
-                depth_env = os.getenv("PY_DEBUG_WING_DEPTHS")
+                depth_env = None
                 if depth_env:
                     depth_list = []
                     for item in depth_env.split(","):
@@ -1776,16 +1728,16 @@ def compute_asynth_from_transp(
                 else:
                     depth_list = [0, 19, 39, 59, 79]
 
-                max_offset_env = os.getenv("PY_DEBUG_WING_OFFSET_MAX")
-                wl_window_env = os.getenv("PY_DEBUG_WING_WL_WINDOW")
-                top_n_env = os.getenv("PY_DEBUG_WING_TOP_N")
-                min_profile_env = os.getenv("PY_DEBUG_WING_MIN_PROFILE")
+                max_offset_env = None
+                wl_window_env = None
+                top_n_env = None
+                min_profile_env = None
                 max_offset = int(max_offset_env) if max_offset_env else None
                 wl_window = float(wl_window_env) if wl_window_env else None
                 top_n = int(top_n_env) if top_n_env else 50
                 min_profile = float(min_profile_env) if min_profile_env else 0.0
-                debug_candidates = os.getenv("PY_DEBUG_WING_CANDIDATES") == "1"
-                debug_fortran_profile = os.getenv("PY_DEBUG_WING_FORTRAN") == "1"
+                debug_candidates = False
+                debug_fortran_profile = False
 
                 if max_offset is None and wl_window is None:
                     print(
@@ -2188,9 +2140,9 @@ def compute_asynth_from_transp(
     print(f"  Values > 1e20: {np.sum(asynth > 1e20):,}")
     print(f"  Values > 1e24: {np.sum(asynth > 1e24):,}")
 
-    debug_wave_env = os.getenv("PY_DEBUG_ASYNTH_WAVE")
-    debug_depth_env = os.getenv("PY_DEBUG_ASYNTH_DEPTH")
-    if debug_wave_env and debug_depth_env:
+    debug_wave_env = None
+    debug_depth_env = None
+    if False and debug_wave_env and debug_depth_env:
         try:
             debug_wave_val = float(debug_wave_env)
             debug_depth_val = int(debug_depth_env) - 1

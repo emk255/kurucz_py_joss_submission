@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 import numpy as np
 
 from numba import jit
@@ -399,11 +398,7 @@ def solve_josh_flux(
     Option 2: Use higher precision arithmetic when alpha (scattering) is large
     to reduce numerical errors. This is especially important when alpha > 0.1.
     """
-    # Keep deep RT diagnostics opt-in; default pipeline runs should stay quiet/fast.
-    if debug and os.getenv("PY_ENABLE_JOSH_DEBUG", "0") != "1":
-        debug = False
-    if debug and os.getenv("PY_ENABLE_JOSH_DEBUG", "0") != "1":
-        debug = False
+    debug = False
 
     # CRITICAL DEBUG: Print at function entry to verify it's being called
     if debug:
@@ -520,35 +515,6 @@ def solve_josh_flux(
     # Only ensure ABTOT >= EPS to prevent division by zero (Fortran also does this)
     abtot = np.maximum(abtot, EPS)
 
-    # Optional debug: dump ABTOT components for a specific wavelength.
-    debug_abtot_wave = os.getenv("PY_DEBUG_ABTOT_WAVE")
-    if debug_label and debug_abtot_wave:
-        try:
-            target_wave = float(debug_abtot_wave)
-        except ValueError:
-            target_wave = None
-        wl_val = None
-        if debug_label.startswith("FLUX_TOTAL_") or debug_label.startswith(
-            "FLUX_CONT_"
-        ):
-            try:
-                wl_val = float(debug_label.split("_")[-1])
-            except ValueError:
-                wl_val = None
-        if (
-            wl_val is not None
-            and target_wave is not None
-            and abs(wl_val - target_wave) < 1e-4
-        ):
-            label = "TOTAL" if debug_label.startswith("FLUX_TOTAL_") else "CONT"
-            print(f"\nPY_DEBUG ABTOT ARRAY {label}: WAVE={wl_val:.8f}")
-            for idx in range(abtot.size):
-                print(
-                    f"  L={idx+1:3d} RHOX={rho[idx]:.8E} ABTOT={abtot[idx]:.8E} "
-                    f"ACONT={acont[idx]:.8E} ALINE={aline[idx]:.8E} "
-                    f"SIGMAC={sigmac[idx]:.8E} SIGMAL={sigmal[idx]:.8E}"
-                )
-
     # CRITICAL: Check for INF/NaN (should be rare, but log if found)
     # Fortran would propagate INF/NaN, but we log a warning for debugging
     if np.any(~np.isfinite(abtot)):
@@ -597,80 +563,6 @@ def solve_josh_flux(
     # SNUBAR can be negative, zero, or exceed SCONT - all are physically possible
     # NOTE: SNUBAR can exceed SCONT if SLINE > SCONT (which is physically possible)
 
-    # Debug SNUBAR at long wavelengths (where emission is observed) or problematic wavelengths
-    debug_long_wl = False
-    debug_problem_wl = False
-    if debug_label and "FLUX_TOTAL" in debug_label:
-        # Extract wavelength from debug_label (format: FLUX_TOTAL_1385.15546931)
-        try:
-            wl_str = debug_label.split("_")[-1]
-            wl_val = float(wl_str)
-            if wl_val > 850.0:  # Long wavelength
-                debug_long_wl = True
-            # Also debug problematic wavelengths with huge flux ratios
-            if 312.0 <= wl_val <= 313.0:  # Problematic wavelengths
-                debug_problem_wl = True
-        except (ValueError, IndexError):
-            pass
-
-    # IMPORTANT: Avoid unconditional per-wavelength stdout spam.
-    # This is extremely slow and can dominate runtime due to I/O.
-    # Preserve the ability to debug long/problem wavelengths via an explicit env flag.
-    debug_snubar_env = os.getenv("PY_DEBUG_SNUBAR") == "1"
-    if debug or (debug_snubar_env and (debug_long_wl or debug_problem_wl)):
-        print(f"\nSNUBAR calculation:")
-        print(f"  ACONT[0] = {acont[0]:.8E}")
-        print(f"  ALINE[0] = {aline[0]:.8E}")
-        print(f"  SCONT[0] = {scont[0]:.8E}")
-        print(f"  SLINE[0] = {sline[0]:.8E}")
-        print(f"  SNUBAR[0] = {snubar[0]:.8E}")
-        print(f"  SNUBAR[0] / SCONT[0] = {snubar[0] / max(scont[0], 1e-40):.6f}")
-        if aline[0] > 0:
-            print(
-                f"  ALINE[0] > 0: SNUBAR = (ACONT*SCONT + ALINE*SLINE) / (ACONT + ALINE)"
-            )
-            print(
-                f"    Numerator: {acont[0] * scont[0]:.6e} + {aline[0] * sline[0]:.6e} = {acont[0] * scont[0] + aline[0] * sline[0]:.6e}"
-            )
-            print(f"    Denominator: {acont[0] + aline[0]:.6e}")
-            print(f"    If SLINE > SCONT and ALINE > 0, SNUBAR > SCONT (emission)")
-            # CRITICAL DEBUG: Check alignment
-            print(f"  Alignment check:")
-            print(f"    SLINE[0] / SCONT[0] = {sline[0] / max(scont[0], 1e-40):.6e}")
-            print(
-                f"    SLINE[-1] / SCONT[-1] = {sline[-1] / max(scont[-1], 1e-40):.6e}"
-            )
-            print(f"    ALINE[0] / ACONT[0] = {aline[0] / max(acont[0], 1e-40):.6f}")
-            print(
-                f"    ALINE[-1] / ACONT[-1] = {aline[-1] / max(acont[-1], 1e-40):.6f}"
-            )
-        print(f"  SNUBAR == SCONT? {np.allclose(snubar, scont, rtol=1e-6)}")
-        print(f"  Max difference: {np.abs(snubar - scont).max():.8E}")
-        # Print SCONT and SNUBAR at critical depths (65-66) for comparison with Fortran
-        if "FLUX_CONT" in debug_label and scont.size > 65:
-            print(
-                f"\n  SCONT/SNUBAR/RHOX at critical depths (for comparison with Fortran):"
-            )
-            for idx in [64, 65, 66, 79]:
-                if idx < scont.size:
-                    temp_str = (
-                        f", T = {temperature[idx]:.2f} K"
-                        if temperature is not None and idx < temperature.size
-                        else ""
-                    )
-                    rho_str = (
-                        f", RHOX = {column_mass[idx]:.8E} g/cm²"
-                        if idx < column_mass.size
-                        else ""
-                    )
-                    print(
-                        f"    Depth {idx}: SCONT = {scont[idx]:.8E}{temp_str}{rho_str}"
-                    )
-                    print(f"              SNUBAR = {snubar[idx]:.8E}")
-                    print(
-                        f"              SNUBAR/SCONT = {snubar[idx] / scont[idx]:.6f}"
-                    )
-
     # CRITICAL DEBUG: Print after SNUBAR to verify we reach this point
     if debug:
         print(
@@ -686,13 +578,6 @@ def solve_josh_flux(
             wavelength_nm = float(debug_label.replace("FLUX_TOTAL_", ""))
         except ValueError:
             pass
-        if (
-            debug
-            and wavelength_nm is not None
-            and abs(wavelength_nm - 418.148489) < 1e-4
-        ):
-            print(f"DEBUG: PY_DUMP_JOSH_ARRAYS={os.getenv('PY_DUMP_JOSH_ARRAYS')}")
-
     # CRITICAL FIX: Fortran convention: J=1 is surface (smallest RHOX), J=NRHOX is deep (largest RHOX)
     # Fortran's INTEG requires RHOX to be INCREASING (surface → deep): RHOX(1) < RHOX(2) < ... < RHOX(N)
     #
@@ -835,65 +720,6 @@ def solve_josh_flux(
                 print(
                     "  SNUBAR[0:10] = " + " ".join(f"{val:.8E}" for val in snubar[:10])
                 )
-
-    # Optional debug: dump full TAUNU and SNUBAR arrays for a specific wavelength.
-    debug_taunu_snubar_wave = os.getenv("PY_DEBUG_TAUNU_SNUBAR_WAVE")
-    if debug_label and debug_taunu_snubar_wave:
-        try:
-            target_wave = float(debug_taunu_snubar_wave)
-        except ValueError:
-            target_wave = None
-        wl_val = None
-        if debug_label.startswith("FLUX_TOTAL_") or debug_label.startswith(
-            "FLUX_CONT_"
-        ):
-            try:
-                wl_val = float(debug_label.split("_")[-1])
-            except ValueError:
-                wl_val = None
-        if (
-            wl_val is not None
-            and target_wave is not None
-            and abs(wl_val - target_wave) < 1e-4
-        ):
-            label = "TOTAL" if debug_label.startswith("FLUX_TOTAL_") else "CONT"
-            print(f"\nPY_DEBUG TAUNU ARRAY {label}: WAVE={wl_val:.8f}")
-            for idx, val in enumerate(taunu, start=1):
-                print(f"  L={idx:3d} TAUNU={val:.8E}")
-            print(f"\nPY_DEBUG SNUBAR ARRAY {label}: WAVE={wl_val:.8f}")
-            for idx, val in enumerate(snubar, start=1):
-                print(f"  L={idx:3d} SNUBAR={val:.8E}")
-            if alpha.size >= 10:
-                print("  ALPHA[0:10] = " + " ".join(f"{val:.8E}" for val in alpha[:10]))
-            if abtot_integ.size > 71:
-                print(f"  ABTOT[71] = {abtot_integ[71]:.8E}")
-                print(f"  RHOX[71] = {rho_integ[71]:.8E}")
-            if alpha.size > 71:
-                print(f"  ALPHA[71] = {alpha[71]:.8E}")
-            dump_flag = os.getenv("PY_DUMP_JOSH_ARRAYS") == "1"
-            if dump_flag:
-                dump_wave = os.getenv("PY_DUMP_JOSH_ARRAYS_WAVE")
-                try:
-                    target_wave = float(dump_wave) if dump_wave else wl_val
-                except ValueError:
-                    target_wave = wl_val
-                if wl_val is not None and abs(wl_val - target_wave) < 1e-4:
-                    dump_path = os.getenv("PY_DUMP_JOSH_ARRAYS_PATH")
-                    if not dump_path:
-                        dump_path = f"out/josh_arrays_{wl_val:.6f}.npz"
-                    np.savez(
-                        dump_path,
-                        taunu=taunu,
-                        snubar=snubar,
-                        alpha=alpha,
-                    )
-                    print(f"  -> Dumped JOSH arrays to {dump_path}")
-        if taunu[0] > XTAU_GRID[-1]:
-            print(f"\n  WARNING: TAUNU[0] exceeds XTAU_GRID max!")
-            print(f"    This will set MAXJ=1, which may affect flux calculation")
-            print(f"    Expected: TAUNU[0] should be small for surface layer")
-            print(f"    Problem: Huge line opacity causes TAUNU to be huge immediately")
-        print(f"{'='*70}\n")
 
     # CRITICAL: After reversing rho for integration, TAUNU is in increasing order:
     #   TAUNU[0] = surface (smallest RHOX), TAUNU[-1] = deep (largest RHOX)
@@ -1288,29 +1114,6 @@ def solve_josh_flux(
             print(
                 f"  Match: {abs(xsbar_modified[0] - xsbar[0] * (1.0 - xalpha[0])) / max(abs(xsbar[0] * (1.0 - xalpha[0])), 1e-40) < 1e-6}"
             )
-        dump_flag = os.getenv("PY_DUMP_JOSH_ARRAYS") == "1"
-        if dump_flag and debug_label and "FLUX_TOTAL_" in debug_label:
-            try:
-                wl_val = float(debug_label.replace("FLUX_TOTAL_", ""))
-            except ValueError:
-                wl_val = None
-            dump_wave = os.getenv("PY_DUMP_JOSH_ARRAYS_WAVE")
-            try:
-                target_wave = float(dump_wave) if dump_wave else wl_val
-            except ValueError:
-                target_wave = wl_val
-            if (
-                wl_val is not None
-                and target_wave is not None
-                and abs(wl_val - target_wave) < 1e-4
-            ):
-                print(
-                    "  XSBAR_MOD[0:10] = "
-                    + " ".join(f"{val:.8E}" for val in xsbar_modified[:10])
-                )
-                print(
-                    "  XALPHA[0:10] = " + " ".join(f"{val:.8E}" for val in xalpha[:10])
-                )
 
         # CRITICAL FIX: Fortran DOES iterate for surface flux until convergence!
         # Fortran code structure (lines 9102-9154):
@@ -1336,50 +1139,6 @@ def solve_josh_flux(
         # Fortran sets XS(L)=XSBAR(L) before applying the (1-XALPHA) modification.
         xs = xsbar.copy()
         num_iterations = 0  # Initialize for debug output
-
-        # Optional debug: mirror first-iteration K=1 sum like Fortran.
-        debug_iter_wave = os.getenv("PY_DEBUG_ITER_STEP_WAVE")
-        if debug_iter_wave and debug_label:
-            try:
-                target_wave = float(debug_iter_wave)
-            except ValueError:
-                target_wave = None
-            wl_val = None
-            if debug_label.startswith("FLUX_TOTAL_") or debug_label.startswith(
-                "FLUX_CONT_"
-            ):
-                try:
-                    wl_val = float(debug_label.split("_")[-1])
-                except ValueError:
-                    wl_val = None
-            if (
-                wl_val is not None
-                and target_wave is not None
-                and abs(wl_val - target_wave) < 1e-4
-            ):
-                xs_tmp = xs.astype(np.float32).copy()
-                coefj_dbg = COEFJ_MATRIX.astype(np.float32)
-                diag_dbg = diag.astype(np.float32)
-                xalpha_dbg = xalpha.astype(np.float32)
-                xsbar_mod_dbg = xsbar_modified.astype(np.float32)
-                nxtau = xs_tmp.size
-                for k in range(nxtau - 1, -1, -1):
-                    sum_val = float(np.dot(coefj_dbg[k, :], xs_tmp))
-                    delxs = (
-                        sum_val * xalpha_dbg[k] + xsbar_mod_dbg[k] - xs_tmp[k]
-                    ) / diag_dbg[k]
-                    if k == 0:
-                        label = (
-                            "TOTAL" if debug_label.startswith("FLUX_TOTAL_") else "CONT"
-                        )
-                        print(
-                            f"PY_DEBUG ITERATION STEP {label}: WAVE={wl_val:.8f} "
-                            f"sum(COEFJ(1,M)*XS(M))={sum_val:.8E} "
-                            f"XSBAR(1)={xsbar_modified[k]:.8E} XS(1)={xs_tmp[k]:.8E} "
-                            f"DIAG(1)={diag[k]:.8E}"
-                        )
-                        break
-                    xs_tmp[k] = max(xs_tmp[k] + delxs, EPS)
 
         # For IFSCAT=1, only the pre-MAP1 TAUNU gate triggers label 401.
         # If MAP1 later returns MAXJ=1, Fortran still stays on the normal XS iteration path.
@@ -1539,31 +1298,6 @@ def solve_josh_flux(
         if taunu.size > 0:
             mask_before = XTAU_GRID < taunu[0]
             print(f"  Points where XTAU_GRID < TAUNU[0]: {np.sum(mask_before)}")
-
-    # Optional debug: dump XS array for a specific wavelength to compare with Fortran.
-    dump_xs_wave = os.getenv("PY_DEBUG_XS_ARRAY_WAVE")
-    if debug_label and dump_xs_wave:
-        try:
-            target_wave = float(dump_xs_wave)
-        except ValueError:
-            target_wave = None
-        wl_val = None
-        if debug_label.startswith("FLUX_TOTAL_") or debug_label.startswith(
-            "FLUX_CONT_"
-        ):
-            try:
-                wl_val = float(debug_label.split("_")[-1])
-            except ValueError:
-                wl_val = None
-        if (
-            wl_val is not None
-            and target_wave is not None
-            and abs(wl_val - target_wave) < 1e-4
-        ):
-            label = "TOTAL" if debug_label.startswith("FLUX_TOTAL_") else "CONT"
-            print(f"\nPY_DEBUG XS_ARRAY {label}: WAVE={wl_val:.8f}")
-            for idx, (xtau, xs_val) in enumerate(zip(XTAU_GRID, xs), start=1):
-                print(f"  L={idx:3d} XTAU={xtau:.8E} XS={xs_val:.8E}")
 
     # When TAUNU is constant (or nearly constant) and > XTAU_GRID max, MAP1 can't
     # extrapolate properly because linear extrapolation requires TAUNU to vary.
@@ -1844,27 +1578,5 @@ def solve_josh_flux(
     # the JOSH solver - it uses the raw SURF(1) value directly. We should do the same.
     #
     # TODO: Investigate root cause of flux discrepancy without applying ad-hoc corrections.
-
-    dump_flag = os.getenv("PY_DUMP_JOSH_ARRAYS") == "1"
-    if dump_flag and wavelength_nm is not None:
-        dump_wave = os.getenv("PY_DUMP_JOSH_ARRAYS_WAVE")
-        try:
-            target_wave = float(dump_wave) if dump_wave else wavelength_nm
-        except ValueError:
-            target_wave = wavelength_nm
-        if abs(wavelength_nm - target_wave) < 1e-4:
-            dump_path = os.getenv("PY_DUMP_JOSH_ARRAYS_PATH")
-            if not dump_path:
-                dump_path = f"out/josh_arrays_{wavelength_nm:.6f}.npz"
-            np.savez(
-                dump_path,
-                taunu=taunu,
-                snubar=snubar,
-                alpha=alpha,
-                xs=xs,
-            )
-            print(f"  -> Dumped JOSH arrays to {dump_path}")
-            print("  XS[0:10] = " + " ".join(f"{val:.8E}" for val in xs[:10]))
-            print(f"  -> Dumped JOSH arrays to {dump_path}")
 
     return flux

@@ -141,17 +141,14 @@ def readmol_exact(molecules_path: Path) -> Tuple[
                 e5 = float(parts[5]) if len(parts) > 5 else 0.0
                 e6 = float(parts[6]) if len(parts) > 6 else 0.0
                 e7 = float(parts[7]) if len(parts) > 7 else 0.0
+        # Skip zero/blank molecular code (sentinel or placeholder in some molecules.dat)
             except (ValueError, IndexError):
                 continue
 
-        # Check for terminator (C == 0)
-        # DEBUG: Track CODE=0.0 handling
+        if c == 0.0 or (isinstance(c, float) and abs(c) < 1e-12):
+            continue
+        # Terminator: CODE=0 means end of molecule list (Fortran conven        # Terminator: CODE=0 means end of molecule list (Fortran convention)
         if c == 0.0:
-            # DEBUG: Verify CODE=0.0 is detected correctly
-            if line_idx >= len(lines) - 5:  # Last few lines
-                print(
-                    f"DEBUG readmol_exact: Line {line_idx+1}: Found CODE=0.0, breaking. nummol={nummol}"
-                )
             break
 
         if nummol >= MAXMOL:
