@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import os
 import numpy as np
 
 from typing import TYPE_CHECKING, Optional
@@ -151,21 +150,6 @@ def build_depth_continuum(
         absorption = np.zeros((n_layers, n_wl), dtype=np.float64)
         scattering = np.zeros((n_layers, n_wl), dtype=np.float64)
 
-        debug_wave = os.environ.get("PY_DEBUG_CONT_WAVE")
-        debug_depth = os.environ.get("PY_DEBUG_CONT_DEPTH")
-        debug_wave_val = None
-        debug_depth_idx = None
-        if debug_wave:
-            try:
-                debug_wave_val = float(debug_wave)
-            except ValueError:
-                debug_wave_val = None
-        if debug_depth:
-            try:
-                debug_depth_idx = max(0, int(debug_depth) - 1)
-            except ValueError:
-                debug_depth_idx = None
-
         # Process each unique edge index
         for edge_idx in range(wledge_abs.size - 1):
             mask = edge_indices == edge_idx
@@ -196,40 +180,6 @@ def build_depth_continuum(
             c1 = (wl_mask - half) * (wl_mask - wl_right) / delta
             c2 = (wl_left - wl_mask) * (wl_mask - wl_right) * 2.0 / delta
             c3 = (wl_mask - wl_left) * (wl_mask - half) / delta
-
-            # CRITICAL DEBUG: Check for problematic interpolation coefficients
-            if edge_idx == 0 and np.any(mask):  # Check first edge only
-                sample_idx = np.where(mask)[0][0] if np.any(mask) else None
-                if sample_idx is not None:
-                    c1_sample = (
-                        c1[sample_idx - np.where(mask)[0][0]] if len(c1) > 0 else 0
-                    )
-                    c2_sample = (
-                        c2[sample_idx - np.where(mask)[0][0]] if len(c2) > 0 else 0
-                    )
-                    c3_sample = (
-                        c3[sample_idx - np.where(mask)[0][0]] if len(c3) > 0 else 0
-                    )
-                    if (
-                        abs(c1_sample) > 1e10
-                        or abs(c2_sample) > 1e10
-                        or abs(c3_sample) > 1e10
-                    ):
-                        print(f"\n{'='*70}")
-                        print(f"CRITICAL: Large interpolation coefficients detected!")
-                        print(f"{'='*70}")
-                        print(
-                            f"  Edge {edge_idx}: wl_left={wl_left:.6f}, wl_right={wl_right:.6f}"
-                        )
-                        print(f"  half={half:.6f}, delta={delta:.6e}")
-                        print(
-                            f"  Sample wavelength: {wl_mask[0] if len(wl_mask) > 0 else 'N/A':.6f}"
-                        )
-                        print(
-                            f"  c1={c1_sample:.6e}, c2={c2_sample:.6e}, c3={c3_sample:.6e}"
-                        )
-                        print(f"{'='*70}\n")
-
             # Get coefficients for this edge across all layers
             a1 = abs_coeff[:, edge_idx, 0]  # shape: (n_layers,)
             a2 = abs_coeff[:, edge_idx, 1]
@@ -237,28 +187,6 @@ def build_depth_continuum(
             s1 = scat_coeff[:, edge_idx, 0]
             s2 = scat_coeff[:, edge_idx, 1]
             s3 = scat_coeff[:, edge_idx, 2]
-
-            # CRITICAL DEBUG: Check coefficient values
-            if edge_idx == 0:  # Check first edge only
-                if (
-                    np.any(np.abs(a1) > 1e10)
-                    or np.any(np.abs(a2) > 1e10)
-                    or np.any(np.abs(a3) > 1e10)
-                ):
-                    print(f"\n{'='*70}")
-                    print(f"CRITICAL: Large coefficient values detected!")
-                    print(f"{'='*70}")
-                    print(
-                        f"  Edge {edge_idx}: a1 range=[{a1.min():.6e}, {a1.max():.6e}]"
-                    )
-                    print(
-                        f"  Edge {edge_idx}: a2 range=[{a2.min():.6e}, {a2.max():.6e}]"
-                    )
-                    print(
-                        f"  Edge {edge_idx}: a3 range=[{a3.min():.6e}, {a3.max():.6e}]"
-                    )
-                    print(f"{'='*70}\n")
-
             # Compute log opacity: broadcast (n_layers,) with (n_wl_in_edge,)
             # Result shape: (n_layers, n_wl_in_edge)
             log_abs = (
@@ -271,28 +199,6 @@ def build_depth_continuum(
                 + s2[:, np.newaxis] * c2[np.newaxis, :]
                 + s3[:, np.newaxis] * c3[np.newaxis, :]
             )
-
-            if (
-                debug_wave_val is not None
-                and debug_depth_idx is not None
-                and debug_depth_idx < n_layers
-                and np.any(mask)
-            ):
-                wl_idx_local = int(np.argmin(np.abs(wl_mask - debug_wave_val)))
-                if abs(wl_mask[wl_idx_local] - debug_wave_val) < 1e-3:
-                    log_abs_val = float(log_abs[debug_depth_idx, wl_idx_local])
-                    log_scat_val = float(log_scat[debug_depth_idx, wl_idx_local])
-                    print(
-                        "PY_DEBUG_CONTCOEF: "
-                        f"wave={wl_mask[wl_idx_local]:.6f} depth={debug_depth_idx + 1} "
-                        f"edge={edge_idx + 1} c1={float(c1[wl_idx_local]):.6e} "
-                        f"c2={float(c2[wl_idx_local]):.6e} c3={float(c3[wl_idx_local]):.6e} "
-                        f"abs1={float(a1[debug_depth_idx]):.6e} "
-                        f"abs2={float(a2[debug_depth_idx]):.6e} "
-                        f"abs3={float(a3[debug_depth_idx]):.6e} "
-                        f"logacont={log_abs_val:.6e} acont={10 ** log_abs_val:.6e} "
-                        f"logascat={log_scat_val:.6e} ascat={10 ** log_scat_val:.6e}"
-                    )
 
             # NOTE: Previous "fix" with log10(3.72) was WRONG
             # The NPZ stores correct SIGMAC values without any extra factor
@@ -313,29 +219,6 @@ def build_depth_continuum(
             # When coefficients are zero (or very small), log_opacity ≈ 0, giving 10^0 = 1.0
             # But if opacity should be zero, this is wrong. Check if coefficients suggest
             # zero opacity and set to very small value instead of 1.0
-
-            # CRITICAL DEBUG: Check log opacity values BEFORE clamping
-            if log_abs.size > 0:
-                max_log_abs_before = np.max(log_abs)
-                min_log_abs_before = np.min(log_abs)
-                nan_count = np.sum(np.isnan(log_abs))
-                inf_count = np.sum(np.isinf(log_abs))
-                if nan_count > 0 or inf_count > 0 or max_log_abs_before > 35.0:
-                    print(f"\n{'='*70}")
-                    print(f"CRITICAL: Continuum log opacity issues detected!")
-                    print(f"{'='*70}")
-                    print(f"  Max log_abs (before clamp): {max_log_abs_before:.6f}")
-                    print(f"  Min log_abs (before clamp): {min_log_abs_before:.6f}")
-                    print(f"  NaN count: {nan_count}")
-                    print(f"  Inf count: {inf_count}")
-                    if max_log_abs_before > 35.0:
-                        print(
-                            f"  WARNING: Max log opacity {max_log_abs_before:.2f} > 35.0!"
-                        )
-                        print(
-                            f"    This will be clamped to 38.0, producing 10^38 = 1e38"
-                        )
-                    print(f"{'='*70}\n")
 
             # CRITICAL FIX: Clamp log opacity to prevent INF (Fortran uses REAL*4, max ~3.4e38)
             # log10(3.4e38) ≈ 38.5, so clamp log values before 10** to prevent overflow
@@ -470,77 +353,6 @@ def build_depth_continuum(
         # Diagnostic: Check for very large log values before conversion
         max_log_abs = np.max(log_abs_clamped) if log_abs_clamped.size > 0 else 0.0
         max_log_scat = np.max(log_scat_clamped) if log_scat_clamped.size > 0 else 0.0
-
-        # DEBUG: Print detailed info for problematic wavelengths (matching Fortran debug)
-        if abs(wave - 300.00040572) < 0.0001 or max_log_abs > 35.0:
-            print(f"\n  DEBUG CONTINUUM: Wavelength {wave:.8f} nm")
-            print(f"    Max log10 absorption: {max_log_abs:.6f}")
-            print(f"    Max log10 scattering: {max_log_scat:.6f}")
-            if log_abs_clamped.size > 0:
-                layer_max = np.unravel_index(
-                    np.argmax(log_abs_clamped), log_abs_clamped.shape
-                )[0]
-                print(
-                    f"    Max log10 abs at layer {layer_max}: {log_abs_clamped.flat[np.argmax(log_abs_clamped)]:.6f}"
-                )
-                print(
-                    f"    Sample log10 abs (layers 0-2): {log_abs_clamped[:min(3, log_abs_clamped.size)]}"
-                )
-
-            # Print coefficient values for this wavelength
-            if atmosphere.continuum_abs_coeff is not None:
-                edge_idx = (
-                    np.searchsorted(atmosphere.continuum_wledge, wave, side="right") - 1
-                )
-                edge_idx = max(
-                    0, min(edge_idx, atmosphere.continuum_abs_coeff.shape[1] - 1)
-                )
-                if edge_idx < atmosphere.continuum_abs_coeff.shape[1]:
-                    print(f"    Using edge interval {edge_idx}")
-                    print(
-                        f"    Edge wavelengths: {atmosphere.continuum_wledge[edge_idx]:.2f} - {atmosphere.continuum_wledge[edge_idx+1]:.2f} nm"
-                    )
-                    if atmosphere.continuum_half_edge is not None and edge_idx < len(
-                        atmosphere.continuum_half_edge
-                    ):
-                        half = atmosphere.continuum_half_edge[edge_idx]
-                        delta = (
-                            atmosphere.continuum_delta_edge[edge_idx]
-                            if atmosphere.continuum_delta_edge is not None
-                            else 0.0
-                        )
-                        print(f"    Half edge: {half:.2f} nm, Delta edge: {delta:.6e}")
-                        # Compute interpolation weights
-                        wl_left = atmosphere.continuum_wledge[edge_idx]
-                        wl_right = atmosphere.continuum_wledge[edge_idx + 1]
-                        c1 = (
-                            (wave - half) * (wave - wl_right) / delta
-                            if delta > 0
-                            else 0.0
-                        )
-                        c2 = (
-                            (wl_left - wave) * (wave - wl_right) * 2.0 / delta
-                            if delta > 0
-                            else 0.0
-                        )
-                        c3 = (
-                            (wave - wl_left) * (wave - half) / delta
-                            if delta > 0
-                            else 0.0
-                        )
-                        print(
-                            f"    Interpolation weights: c1={c1:.6f}, c2={c2:.6f}, c3={c3:.6f}"
-                        )
-                        # Print coefficients for first layer
-                        if atmosphere.continuum_abs_coeff.shape[0] > 0:
-                            a1, a2, a3 = atmosphere.continuum_abs_coeff[0, edge_idx, :]
-                            print(
-                                f"    Coefficients (layer 0): a1={a1:.6f}, a2={a2:.6f}, a3={a3:.6f}"
-                            )
-                            log_interp = c1 * a1 + c2 * a2 + c3 * a3
-                            print(
-                                f"    Interpolated log10: {log_interp:.6f} (should match max above)"
-                            )
 
         if max_log_abs > 35.0:  # 10^35 is getting close to REAL*4 max
             logger.warning(

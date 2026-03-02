@@ -134,7 +134,6 @@ def profile_atmosphere(
         resolution=RESOLUTION,
         npz_path=npz_path if npz_path.exists() else None,
         n_workers=n_workers,
-        debug=False,
     )
     cfg.log_level = "INFO"
 

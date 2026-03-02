@@ -110,11 +110,6 @@ def build_parser() -> argparse.ArgumentParser:
         default=0.0,
         help="Microturbulent velocity (km/s)",
     )
-    parser.add_argument(
-        "--debug",
-        action="store_true",
-        help="Enable detailed debug output for JOSH solver (verbose, use only for debugging)",
-    )
     return parser
 
 
@@ -143,7 +138,6 @@ def main(argv: Optional[list[str]] = None) -> int:
         rhoxj_scale=args.rhoxj,
         npz_path=args.npz,
         n_workers=args.n_workers,
-        debug=args.debug,
         allow_tfort_runtime=args.allow_tfort_runtime,
     )
     if args.cache:

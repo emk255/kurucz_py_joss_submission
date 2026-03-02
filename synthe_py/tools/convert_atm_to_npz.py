@@ -321,9 +321,6 @@ def parse_atm_file(atm_path: Path) -> dict:
             ]
             if len(ifop_values) >= 20:
                 data["ifop"] = ifop_values[:20]
-                # Print for debugging
-                print(f"  Parsed IFOP from .atm: {data['ifop']}")
-                print(f"    IFOP(13)={data['ifop'][12]} (H2RAOP)")
 
         elif line.startswith("READ DECK6"):
 
@@ -1164,82 +1161,6 @@ def compute_continuum_from_atm(
 
     cont_scat_log = np.clip(cont_scat_log, -np.inf, MAX_LOG_OPACITY)
 
-    # DEBUG: Check if clamping occurred
-
-    clamped_abs_mask = cont_abs_log_before_clamp > MAX_LOG_OPACITY
-
-    clamped_scat_mask = cont_scat_log_before_clamp > MAX_LOG_OPACITY
-
-    if np.any(clamped_abs_mask):
-
-        print(
-            f"  WARNING: {np.sum(clamped_abs_mask)} log10 ACONT values clamped from max {cont_abs_log_before_clamp.max():.2f} to {MAX_LOG_OPACITY}"
-        )
-
-        print(
-            f"    This means linear ACONT values >= 10^{MAX_LOG_OPACITY:.1f} = {10**MAX_LOG_OPACITY:.2e} cm²/g"
-        )
-
-    # Note: SIGMAC is NOT clamped (matching Fortran behavior)
-    # Fortran stores whatever SIGMAC KAPP computes, even if huge
-    # This allows Python to match Fortran exactly without artificial limits
-
-    if np.any(clamped_scat_mask):
-
-        print(
-            f"  WARNING: {np.sum(clamped_scat_mask)} log10 SIGMAC values clamped from max {cont_scat_log_before_clamp.max():.2f} to {MAX_LOG_OPACITY}"
-        )
-
-        print(
-            f"    This means linear SIGMAC values >= 10^{MAX_LOG_OPACITY:.1f} = {10**MAX_LOG_OPACITY:.2e} cm²/g"
-        )
-
-    print(f"  Log10 ACONT range: [{cont_abs_log.min():.6f}, {cont_abs_log.max():.6f}]")
-
-    print(
-        f"  Log10 SIGMAC range: [{cont_scat_log.min():.6f}, {cont_scat_log.max():.6f}]"
-    )
-
-    # CRITICAL VALIDATION: Check if SIGMAC is reasonable
-    # Expected log10(SIGMAC): ~-3 to -2 (linear: 0.001 to 0.01 cm²/g)
-    # If log10(SIGMAC) > 5, there's likely a unit conversion issue or RHO is too small
-    if cont_scat_log.max() > 5.0:
-        print(
-            f"\n  ⚠️  CRITICAL WARNING: log10(SIGMAC) max = {cont_scat_log.max():.6f} is VERY LARGE!"
-        )
-        print(f"    Expected: ~-3 to -2 (linear: 0.001 to 0.01 cm²/g)")
-        print(f"    This suggests:")
-        print(
-            f"      1. RHO (mass_density) is too small (check mass_density calculation)"
-        )
-        print(f"      2. Unit conversion issue in KAPP SIGMAC computation")
-        print(f"      3. Population values are wrong")
-        print(f"    This will cause TAUNU to be huge and MAP1 to fail!")
-        print(f"    Check: RHO[0] should be ~1e-6 to 1e-2 g/cm³")
-        print(
-            f"    Current: RHO[0] = {atmosphere.mass_density[0]:.6e} g/cm³"
-            if hasattr(atmosphere, "mass_density") and atmosphere.mass_density.size > 0
-            else ""
-        )
-
-    # DEBUG: Print sample log10 values
-
-    print(f"  Sample log10 ACONT values (first 3 layers, first 5 frequencies):")
-
-    for layer_idx in range(min(3, cont_abs_log.shape[0])):
-
-        for freq_idx in range(min(5, cont_abs_log.shape[1])):
-
-            log_val = cont_abs_log[layer_idx, freq_idx]
-
-            linear_val = (
-                10.0**log_val if log_val < MAX_LOG_OPACITY else 10.0**MAX_LOG_OPACITY
-            )
-
-            print(
-                f"    Layer {layer_idx}, Freq {freq_idx}: log10={log_val:.6f}, linear={linear_val:.6e} cm²/g"
-            )
-
     return cont_abs_log, cont_scat_log
 
 
@@ -1405,26 +1326,6 @@ def create_atmosphere_model(
                 "Fortran computes this from Saha-Boltzmann equilibrium - no fallback allowed."
             )
 
-        # DEBUG: Print population values for comparison with Fortran
-        print(f"\n  DEBUG: XNFPH Population Values (for comparison with Fortran):")
-        print(f"  XNFH (H I) range: [{xnf_h.min():.6e}, {xnf_h.max():.6e}] atoms/cm³")
-        print(f"  XNFH (H I) first 3 layers: {xnf_h[:3]}")
-        print(
-            f"  XNFH II (ionized H) range: [{xnfph_arr[:, 1].min():.6e}, {xnfph_arr[:, 1].max():.6e}] atoms/cm³"
-        )
-        print(f"  XNFH II (ionized H) first 3 layers: {xnfph_arr[:, 1][:3]}")
-        print(
-            f"  Expected H I range: ~1e10-1e20 atoms/cm³ for typical stellar atmospheres"
-        )
-        print(
-            f"  Expected H II range: ~1e8-1e15 atoms/cm³ (much less than H I in cool stars)"
-        )
-
-        if xnf_h.max() > 1e25:
-            print(f"  WARNING: XNFH values seem too large (max={xnf_h.max():.6e})")
-
-        if xnf_h.min() < 1e5:
-            print(f"  WARNING: XNFH values seem too small (min={xnf_h.min():.6e})")
 
     # CRITICAL FIX: Pass xnf_h (mode=12) for HRAYOP's compute_ground_state_hydrogen
     # kapp.py checks atmosphere.xnf_h first, then falls back to xnfph

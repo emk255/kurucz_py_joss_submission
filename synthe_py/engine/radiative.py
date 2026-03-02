@@ -48,9 +48,7 @@ def solve_lte_frequency(
     line_opacity: np.ndarray,
     line_scattering: np.ndarray,
     line_source: Optional[np.ndarray] = None,
-    debug: bool = False,
 ) -> Tuple[float, float]:
-    debug = False
 
     # Filter INF/NaN values in continuum opacity (prevents TAUNU integration failure)
     # Fortran uses REAL*4 for CONTINUUM (max ~3.4e38), so filter values exceeding this
@@ -119,11 +117,6 @@ def solve_lte_frequency(
         # Now ensure mass is in increasing order (surface → deep) for INTEG
         # Fortran's INTEG requires RHOX to be monotonically increasing
         if not mass_increasing:
-            # mass is decreasing, reverse everything (matching Fortran's expectation that RHOX increases)
-            if wavelength_nm < 400.0:
-                print(
-                    f"  WARNING: Mass is decreasing, reversing all arrays to match Fortran convention"
-                )
             mass = mass[::-1]
             temp = temp[::-1]
             cont_a = cont_a[::-1]
@@ -151,8 +144,6 @@ def solve_lte_frequency(
         # We do this here (after getting the full array) rather than earlier to avoid
         # issues with parameter reassignment
         if line_a_was_reversed:
-            if wavelength_nm < 400.0:
-                print(f"  REVERSING line_source full array (line_a was reversed)")
             ls_full = ls_full[::-1]
 
         # CRITICAL: Filter NaN/INF from line_source BEFORE masking
@@ -206,9 +197,6 @@ def solve_lte_frequency(
         cont_s,  # sigmac: continuum scattering opacity (CRITICAL FIX!)
         zero_scatter,
         mass,
-        debug=False,
-        debug_label=f"FLUX_CONT_{wavelength_nm:.8f}",
-        temperature=temp,  # Pass temperature for debug output
     )
 
     # CRITICAL FIX: Fortran spectrv.for passes ACONT (absorption only) to JOSH, not ABTOT
@@ -225,9 +213,6 @@ def solve_lte_frequency(
         cont_s,  # SIGMAC (scattering) - handled separately by JOSH solver
         line_sig,
         mass,
-        debug=False,
-        debug_label=f"FLUX_TOTAL_{wavelength_nm:.8f}",
-        temperature=temp,  # Pass temperature for debug output
     )
 
     return flux_total, flux_cont
@@ -244,7 +229,6 @@ def _process_wavelength_batch(
         np.ndarray,
         np.ndarray,
         Optional[np.ndarray],
-        bool,
     ],
 ) -> Tuple[int, float, float]:
     """Process a single wavelength (for parallel execution)."""
@@ -258,7 +242,6 @@ def _process_wavelength_batch(
         line_opacity_col,
         line_scattering_col,
         line_source_col,
-        debug,
     ) = args
 
     ft, fc = solve_lte_frequency(
@@ -270,7 +253,6 @@ def _process_wavelength_batch(
         line_opacity_col,
         line_scattering_col,
         line_source_col,
-        debug=debug,
     )
     return idx, ft, fc
 
@@ -287,7 +269,6 @@ def _process_wavelength_chunk(
             np.ndarray,
             np.ndarray,
             Optional[np.ndarray],
-            bool,
         ]
     ],
 ) -> list[Tuple[int, float, float]]:
@@ -308,7 +289,6 @@ def solve_lte_spectrum(
     line_scattering: np.ndarray,
     line_source: Optional[np.ndarray] = None,
     n_workers: Optional[int] = None,
-    debug: bool = False,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
     Solve LTE radiative transfer for a spectrum.
@@ -360,36 +340,6 @@ def solve_lte_spectrum(
     elif n_workers < 1:
         n_workers = 1
 
-    # Enable debug for first few wavelengths to compare with Fortran (if debug=False)
-    debug_wavelengths = [
-        320.973013,
-        311.304157,
-        317.130618,
-        315.903591,
-        315.904644,
-        317.122162,
-        311.305195,
-        311.303120,
-        319.494605,
-        320.974083,
-        317.131676,
-        320.979432,
-        320.978363,
-        320.971943,
-        311.302082,
-        315.910962,
-        320.975153,
-        317.121105,
-        319.493540,
-        320.977293,
-    ]
-    if debug:
-        debug_flags = np.ones(n_points, dtype=bool)
-    else:
-        debug_flags = np.zeros(n_points, dtype=bool)
-        for dwl in debug_wavelengths:
-            debug_flags |= np.abs(wavelength_nm - dwl) < 0.001
-
     # Log initial status
     logger.info(f"Solving radiative transfer for {n_points:,} wavelengths...")
     if n_points > 10000:
@@ -432,7 +382,6 @@ def solve_lte_spectrum(
                 line_opacity[:, idx],
                 line_scattering[:, idx],
                 line_src_col,
-                debug=bool(debug_flags[idx]),
             )
             return idx, ft, fc
 
@@ -518,7 +467,6 @@ def solve_lte_spectrum(
 
         for idx in range(n_points):
             wl = wavelength_nm[idx]
-            debug_this = bool(debug_flags[idx])
 
             line_src_col = line_source[:, idx] if line_source is not None else None
             ft, fc = solve_lte_frequency(
@@ -530,7 +478,6 @@ def solve_lte_spectrum(
                 line_opacity[:, idx],
                 line_scattering[:, idx],
                 line_src_col,
-                debug=debug_this,
             )
             flux_total[idx] = ft
             flux_cont[idx] = fc
@@ -542,15 +489,6 @@ def solve_lte_spectrum(
                     f"Progress: {idx+1:,}/{n_points:,} ({percent:.1f}%) - "
                     f"wavelength {wl:.2f} nm"
                 )
-
-            if debug_this:
-                print(f"\n{'='*70}")
-                print(f"WAVELENGTH {wl:.8f} nm - FINAL RESULTS")
-                print(f"{'='*70}")
-                print(f"  Flux total (HNU): {ft:.8E}")
-                print(f"  Flux continuum (HNU): {fc:.8E}")
-                print(f"  Ratio: {ft / max(fc, 1e-40):.6f}")
-                print(f"{'='*70}\n")
 
     logger.info(f"Completed radiative transfer for {n_points:,} wavelengths")
     return flux_total, flux_cont

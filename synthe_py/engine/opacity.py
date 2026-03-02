@@ -3645,109 +3645,11 @@ def run_synthesis(cfg: SynthesisConfig) -> SynthResult:
     # ASYNTH from compute_transp does not include metal_wings; add them here.
     using_asynth = asynth_npz is not None or has_lines
     if not using_asynth:
-        # CRITICAL DEBUG: Check values before overwriting buffers.line_opacity
-        print("\n" + "=" * 70)
-        if cfg.debug:
-            print(
-                "CRITICAL DEBUG: Before setting buffers.line_opacity = total_line_absorption (NOT using ASYNTH)"
-            )
-            print("=" * 70)
-            print(f"Array shapes:")
-            print(f"  abs_core_base: {abs_core_base.shape}")
-            print(f"  ahline: {ahline.shape}")
-            print(f"  metal_wings: {metal_wings.shape}")
-            print(f"  wavelength: {wavelength.shape}")
-            print(f"\nabs_core_base statistics:")
-            print(
-                f"  non-zero count: {np.count_nonzero(abs_core_base)} / {abs_core_base.size}"
-            )
-            print(f"  max: {np.max(abs_core_base):.2e}")
-            if np.any(abs_core_base > 0):
-                print(f"  min (non-zero): {np.min(abs_core_base[abs_core_base > 0]):.2e}")
-            else:
-                print("  min (non-zero): N/A")
-            print(
-                f"  percentage non-zero: {100*np.count_nonzero(abs_core_base)/abs_core_base.size:.2f}%"
-            )
-            print(f"\nahline statistics:")
-            print(f"  non-zero count: {np.count_nonzero(ahline)} / {ahline.size}")
-            print(f"  max: {np.max(ahline):.2e}")
-            if np.any(ahline > 0):
-                print(f"  min (non-zero): {np.min(ahline[ahline > 0]):.2e}")
-            else:
-                print("  min (non-zero): N/A")
-            print(f"  percentage non-zero: {100*np.count_nonzero(ahline)/ahline.size:.2f}%")
-            print(f"\nmetal_wings statistics:")
-            print(f"  non-zero count: {np.count_nonzero(metal_wings)} / {metal_wings.size}")
-            print(f"  max: {np.max(metal_wings):.2e}")
-            if np.any(metal_wings > 0):
-                print(f"  min (non-zero): {np.min(metal_wings[metal_wings > 0]):.2e}")
-            else:
-                print("  min (non-zero): N/A")
-            print(
-                f"  percentage non-zero: {100*np.count_nonzero(metal_wings)/metal_wings.size:.2f}%"
-            )
-            print(f"\ntotal_line_absorption statistics:")
-            print(
-                f"  non-zero count: {np.count_nonzero(total_line_absorption)} / {total_line_absorption.size}"
-            )
-            print(f"  max: {np.max(total_line_absorption):.2e}")
-            if np.any(total_line_absorption > 0):
-                print(
-                    f"  min (non-zero): {np.min(total_line_absorption[total_line_absorption > 0]):.2e}"
-                )
-            else:
-                print("  min (non-zero): N/A")
-            print(
-                f"  percentage non-zero: {100*np.count_nonzero(total_line_absorption)/total_line_absorption.size:.2f}%"
-            )
-
-            # Check per-wavelength statistics
-            if abs_core.shape[1] == wavelength.size:
-                abs_core_nonzero_wl = np.sum(np.any(abs_core > 0, axis=0))
-                print(
-                    f"  abs_core: {abs_core_nonzero_wl} wavelengths with at least one non-zero depth"
-                )
-            if ahline.shape[1] == wavelength.size:
-                ahline_nonzero_wl = np.sum(np.any(ahline > 0, axis=0))
-                print(
-                    f"  ahline: {ahline_nonzero_wl} wavelengths with at least one non-zero depth"
-                )
-            if metal_wings.shape[1] == wavelength.size:
-                metal_wings_nonzero_wl = np.sum(np.any(metal_wings > 0, axis=0))
-                print(
-                    f"  metal_wings: {metal_wings_nonzero_wl} wavelengths with at least one non-zero depth"
-                )
-            total_nonzero_wl = np.sum(np.any(total_line_absorption > 0, axis=0))
-            print(
-                f"  total_line_absorption: {total_nonzero_wl} wavelengths with at least one non-zero depth"
-            )
-
-            if np.all(total_line_absorption == 0.0):
-                print("\nERROR: total_line_absorption is ALL ZEROS!")
-                print("  This means: abs_core_base + ahline + metal_wings = 0")
-                print("  Check why each component is zero.")
-            else:
-                print("\ntotal_line_absorption is NOT all zeros - has some non-zero values")
-            print("=" * 70 + "\n")
-
         buffers.line_opacity[:] = total_line_absorption
     else:
         # Using ASYNTH mode: buffers.line_opacity was already set to absorption = asynth * (1 - fscat)
         # For range-filtered runs, add off-grid wing contributions to match Fortran's
         # full-grid accumulation prior to ASYNTH.
-        if cfg.debug:
-            print("\n" + "=" * 70)
-            print(
-                "CRITICAL: Using ASYNTH mode - NOT overwriting buffers.line_opacity with metal_wings!"
-            )
-            print("=" * 70)
-            print("  Fortran spectrv.for line 300: ALINE(J) = ASYNTH(J) * (1 - FSCAT(J))")
-            print(
-                "  Python buffers.line_opacity was already set to absorption = asynth * (1 - fscat)"
-            )
-            print("  Keeping it as is (NOT adding metal_wings)")
-            print("=" * 70 + "\n")
         if np.any(helium_wings > 0):
             # Apply the same ASYNTH split used by Fortran:
             # absorption += ASYNTH_he * (1-FSCAT), scattering += ASYNTH_he * FSCAT.
@@ -3757,117 +3659,6 @@ def run_synthesis(cfg: SynthesisConfig) -> SynthResult:
             buffers.line_opacity += helium_asynth * (1.0 - fscat_vec[:, None])
             alinec_total = alinec_total + helium_asynth
     buffers.line_scattering[:] = alinec_total * fscat_vec[:, None]
-
-    if cfg.debug:
-        # CRITICAL DEBUG: Wavelength-by-wavelength analysis of line opacity
-        print("\n" + "=" * 70)
-        print("WAVELENGTH-BY-WAVELENGTH LINE OPACITY ANALYSIS")
-        print("=" * 70)
-        zero_wl_count = 0
-        nonzero_wl_count = 0
-        zero_wl_indices = []
-        nonzero_wl_indices = []
-
-        for wl_idx in range(wavelength.size):
-            wl = wavelength[wl_idx]
-            line_op_wl = buffers.line_opacity[:, wl_idx]
-            abs_core_wl = (
-                abs_core[:, wl_idx]
-                if abs_core.shape[1] == wavelength.size
-                else abs_core[:, 0]
-            )
-            ahline_wl = (
-                ahline[:, wl_idx] if ahline.shape[1] == wavelength.size else ahline[:, 0]
-            )
-            metal_wings_wl = (
-                metal_wings[:, wl_idx]
-                if metal_wings.shape[1] == wavelength.size
-                else metal_wings[:, 0]
-            )
-
-            is_zero = np.all(line_op_wl == 0.0)
-            max_val = np.max(line_op_wl)
-
-            if is_zero:
-                zero_wl_count += 1
-                zero_wl_indices.append(wl_idx)
-                # Show first 10 zero wavelengths with breakdown
-                if zero_wl_count <= 10:
-                    print(f"\nWavelength {wl:.8f} nm (idx {wl_idx}): ALL ZEROS")
-                    print(f"  abs_core max: {np.max(abs_core_wl):.2e}")
-                    print(f"  ahline max: {np.max(ahline_wl):.2e}")
-                    print(f"  metal_wings max: {np.max(metal_wings_wl):.2e}")
-                    print(f"  total_line_absorption max: {max_val:.2e}")
-            else:
-                nonzero_wl_count += 1
-                nonzero_wl_indices.append(wl_idx)
-                # Show first 10 non-zero wavelengths with breakdown
-                if nonzero_wl_count <= 10:
-                    print(
-                        f"\nWavelength {wl:.8f} nm (idx {wl_idx}): NON-ZERO (max={max_val:.2e})"
-                    )
-                    print(
-                        f"  abs_core max: {np.max(abs_core_wl):.2e} ({100*np.max(abs_core_wl)/max_val:.1f}%)"
-                    )
-                    print(
-                        f"  ahline max: {np.max(ahline_wl):.2e} ({100*np.max(ahline_wl)/max_val:.1f}%)"
-                    )
-                    print(
-                        f"  metal_wings max: {np.max(metal_wings_wl):.2e} ({100*np.max(metal_wings_wl)/max_val:.1f}%)"
-                    )
-                    print(f"  Surface value: {line_op_wl[0]:.2e}")
-                    print(f"  Deep value: {line_op_wl[-1]:.2e}")
-            if zero_wl_count == 10:
-                print(
-                    f"\n  ... (showing first 10 zero wavelengths, {wavelength.size - len(zero_wl_indices) - len(nonzero_wl_indices)} more to check)"
-                )
-            if nonzero_wl_count == 10:
-                print(
-                    f"\n  ... (showing first 10 non-zero wavelengths, {wavelength.size - len(zero_wl_indices) - len(nonzero_wl_indices)} more to check)"
-                )
-
-        print("\n" + "=" * 70)
-        print(f"SUMMARY: Line Opacity by Wavelength")
-        print("=" * 70)
-        print(f"Total wavelengths: {wavelength.size}")
-        print(
-            f"Wavelengths with ZERO line opacity: {zero_wl_count} ({100*zero_wl_count/wavelength.size:.1f}%)"
-        )
-        print(
-            f"Wavelengths with NON-ZERO line opacity: {nonzero_wl_count} ({100*nonzero_wl_count/wavelength.size:.1f}%)"
-        )
-
-        if zero_wl_count > 0:
-            print(f"\nFirst 5 zero-wavelength indices: {zero_wl_indices[:5]}")
-            print(
-                f"First 5 zero wavelengths: {[wavelength[i] for i in zero_wl_indices[:5]]}"
-            )
-
-        if nonzero_wl_count > 0:
-            print(f"\nFirst 5 non-zero-wavelength indices: {nonzero_wl_indices[:5]}")
-            print(
-                f"First 5 non-zero wavelengths: {[wavelength[i] for i in nonzero_wl_indices[:5]]}"
-            )
-            # Check if non-zero wavelengths are clustered
-            if len(nonzero_wl_indices) > 1:
-                gaps = [
-                    nonzero_wl_indices[i + 1] - nonzero_wl_indices[i]
-                    for i in range(min(10, len(nonzero_wl_indices) - 1))
-                ]
-                avg_gap = np.mean(gaps)
-                print(
-                    f"Average gap between non-zero wavelengths (first 10): {avg_gap:.1f} indices"
-                )
-
-        # Component breakdown
-        print(f"\nComponent Breakdown (max values across all wavelengths):")
-        print(f"  abs_core_base max: {np.max(abs_core):.2e}")
-        print(f"  abs_core_base non-zero count: {np.count_nonzero(abs_core)}")
-        print(f"  ahline max: {np.max(ahline):.2e}")
-        print(f"  ahline non-zero count: {np.count_nonzero(ahline)}")
-        print(f"  metal_wings max: {np.max(metal_wings):.2e}")
-        print(f"  metal_wings non-zero count: {np.count_nonzero(metal_wings)}")
-        print("=" * 70 + "\n")
 
     # CRITICAL: When using ASYNTH (whether from fort.29 or computed from catalog),
     # Fortran ALWAYS uses SLINE = BNU*STIM/(BFUDGE-EHVKT) = slinec
@@ -3881,26 +3672,11 @@ def run_synthesis(cfg: SynthesisConfig) -> SynthResult:
     # Note: has_lines=True indicates we computed ASYNTH from catalog (see line 1426-1456)
     # So if has_lines=True, we're using ASYNTH (regardless of asynth_npz)
     using_asynth = asynth_npz is not None or has_lines
-    if cfg.debug:
-        print(f"\n{'='*70}")
-        print(f"DEBUG: Line source computation decision")
-        print(f"{'='*70}")
-        print(f"  asynth_npz is not None: {asynth_npz is not None}")
-        print(f"  has_lines: {has_lines}")
-        print(f"  using_asynth: {using_asynth}")
-        print(f"  slinec shape: {slinec.shape}")
-        print(f"  slinec min/max: {np.min(slinec):.6e} / {np.max(slinec):.6e}")
-        print(f"  bnu min/max: {np.min(bnu):.6e} / {np.max(bnu):.6e}")
-        print(f"  slinec == bnu (all close): {np.allclose(slinec, bnu, rtol=1e-6)}")
     if using_asynth:
         # Use SLINEC in ASYNTH mode to match the source-function scaling used in
         # the opacity/source pipeline and avoid spurious line emission in cool models.
         line_source = slinec.copy()
-        if cfg.debug:
-            print(f"  -> Using slinec directly (ASYNTH mode)")
     else:
-        if cfg.debug:
-            print(f"  -> Computing weighted average (fort.9 ALINEC mode)")
         # Using fort.9 ALINEC or computed lines: compute weighted source function
         # Match Fortran atlas7v.for line 4497-4498:
         # SLINE = (AHLINE*SHLINE + ALINES*BNU + AXLINE*SXLINE) / ALINE
@@ -3916,25 +3692,7 @@ def run_synthesis(cfg: SynthesisConfig) -> SynthResult:
             (metal_wings > 1e-40) & (np.abs(sxline) > 1e-40), sxline, bnu
         )
         metal_contribution = metal_wings * metal_source
-        # CRITICAL DEBUG: Check if metal contribution is being computed correctly
-        if cfg.debug and np.any(metal_wings > 1e10):
-            print(
-                f"\nWARNING: Large metal_wings detected! Max: {np.max(metal_wings):.2e}"
-            )
-            print(f"  metal_source max: {np.max(metal_source):.2e}")
-            print(f"  metal_contribution max: {np.max(metal_contribution):.2e}")
-            print(
-                f"  numerator before adding metal: max={np.max(numerator):.2e}, non-zero count={np.count_nonzero(numerator)}"
-            )
         numerator = numerator + metal_contribution
-        if cfg.debug and np.any(metal_wings > 1e10):
-            print(
-                f"  numerator after adding metal: max={np.max(numerator):.2e}, non-zero count={np.count_nonzero(numerator)}"
-            )
-            print(
-                f"  Check: Is metal_contribution finite? {np.all(np.isfinite(metal_contribution))}"
-            )
-            print(f"  Check: Is numerator finite? {np.all(np.isfinite(numerator))}")
 
 
         with np.errstate(divide="ignore", invalid="ignore"):
@@ -4026,25 +3784,6 @@ def run_synthesis(cfg: SynthesisConfig) -> SynthResult:
             f"  Line opacity is NOT all zeros - should produce different flux and continuum"
         )
 
-    # CRITICAL DEBUG: Print directly to stdout (bypasses logger)
-    if cfg.debug:
-        print("\n" + "=" * 70)
-        print("CRITICAL DEBUG: Before solve_lte_spectrum")
-        print("=" * 70)
-        print(f"Line opacity shape: {buffers.line_opacity.shape}")
-        print(f"Line opacity non-zero count: {np.count_nonzero(buffers.line_opacity)}")
-        print(f"Line opacity max: {np.max(buffers.line_opacity):.2e}")
-        if len(line_indices) > 0:
-            first_line_idx = line_indices[0]
-            print(
-                f"At first line wavelength (idx {first_line_idx}): {float(buffers.line_opacity[0, first_line_idx]):.2e}"
-            )
-        if np.all(buffers.line_opacity == 0.0):
-            print("ERROR: buffers.line_opacity is ALL ZEROS!")
-        else:
-            print("Line opacity is NOT all zeros")
-        print("=" * 70 + "\n")
-
     t_rt = time.perf_counter()
     flux_total, flux_cont = solve_lte_spectrum(
         wavelength,
@@ -4056,7 +3795,6 @@ def run_synthesis(cfg: SynthesisConfig) -> SynthResult:
         buffers.line_scattering,
         line_source=line_source,
         n_workers=n_workers,
-        debug=cfg.debug,
     )
     _timings["radiative transfer"] = time.perf_counter() - t_rt
     logger.info("Timing: radiative transfer in %.3fs", _timings["radiative transfer"])
@@ -4076,57 +3814,6 @@ def run_synthesis(cfg: SynthesisConfig) -> SynthResult:
             line_scattering=buffers.line_scattering,
         )
         logger.info("Stage 5 dump (RT output) saved")
-
-    # CRITICAL DEBUG: Check if flux values are identical
-    if cfg.debug:
-        print("\n" + "=" * 70)
-        print("CRITICAL DEBUG: After solve_lte_spectrum")
-        print("=" * 70)
-        print(f"flux_total shape: {flux_total.shape}")
-        print(f"flux_cont shape: {flux_cont.shape}")
-        if len(flux_total) > 0:
-            print(f"First 5 flux_total: {flux_total[:5]}")
-            print(f"First 5 flux_cont: {flux_cont[:5]}")
-            # Check if they're identical with more detailed diagnostics
-            are_close = np.isclose(flux_total, flux_cont, rtol=1e-10)
-            n_identical = np.sum(are_close)
-            n_different = np.sum(~are_close)
-            print(f"Are they identical? {n_identical == len(flux_total)}")
-            print(
-                f"  Identical at {n_identical}/{len(flux_total)} wavelengths ({100*n_identical/len(flux_total):.2f}%)"
-            )
-            print(
-                f"  Different at {n_different}/{len(flux_total)} wavelengths ({100*n_different/len(flux_total):.2f}%)"
-            )
-            if n_different > 0:
-                # Show statistics for different values
-                diff_mask = ~are_close
-                diff_ratios = flux_total[diff_mask] / np.maximum(
-                    flux_cont[diff_mask], 1e-40
-                )
-                print(
-                    f"  Ratio (total/cont) for different values: min={np.min(diff_ratios):.6f}, max={np.max(diff_ratios):.6f}, mean={np.mean(diff_ratios):.6f}"
-                )
-                # Show first few different wavelengths
-                diff_indices = np.where(diff_mask)[0]
-                print(f"  First 5 different wavelengths:")
-                for idx in diff_indices[:5]:
-                    wl = wavelength[idx] if wavelength.size > idx else 0.0
-                    print(
-                        f"    idx={idx}, λ={wl:.2f} nm: flux_total={flux_total[idx]:.6e}, flux_cont={flux_cont[idx]:.6e}, ratio={flux_total[idx]/max(flux_cont[idx],1e-40):.6f}"
-                    )
-
-            if n_identical == len(flux_total):
-                print(
-                    "ERROR: flux_total and flux_cont are IDENTICAL at ALL wavelengths!"
-                )
-            elif n_identical > len(flux_total) * 0.9:
-                print(
-                    f"WARNING: flux_total ≈ flux_cont at {100*n_identical/len(flux_total):.1f}% of wavelengths!"
-                )
-                print("  This suggests line opacity is not effectively reducing flux.")
-
-        print("=" * 70 + "\n")
 
     # Diagnostic: check flux before conversion
     if wavelength.size > 0:

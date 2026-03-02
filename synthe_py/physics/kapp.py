@@ -20,8 +20,6 @@ from typing import TYPE_CHECKING, Tuple, Optional
 
 import numpy as np
 
-# Debug output flags (controlled via environment variables)
-_TRACE_KAPP = os.environ.get("NM_TRACE_KAPP", "").strip().lower() in ("1", "true")
 _SCALE_HMINFF = float(os.environ.get("PY_SCALE_HMINFF", "1.0"))
 _SCALE_HRAYOP = float(os.environ.get("PY_SCALE_HRAYOP", "1.0"))
 _SCALE_H2RAOP = float(os.environ.get("PY_SCALE_H2RAOP", "1.0"))
@@ -31,8 +29,6 @@ from .karsas_tables import xkarsas
 from .hydrogen_wings import compute_hydrogen_continuum
 
 logger = logging.getLogger(__name__)
-# Enable debug output for KAPP diagnostics
-logger.setLevel(logging.INFO)
 
 if TYPE_CHECKING:
     from ..io.atmosphere import AtmosphereModel
@@ -929,7 +925,7 @@ def _map1_simple(xold: np.ndarray, fold: np.ndarray, xnew: float) -> float:
 
     # Convert scalar to array for full MAP1 implementation
     xnew_arr = np.array([xnew], dtype=np.float64)
-    fnew_arr, _ = _map1(xold, fold, xnew_arr, debug=False)
+    fnew_arr, _ = _map1(xold, fold, xnew_arr)
     return float(fnew_arr[0])
 
 
@@ -6044,15 +6040,6 @@ def compute_kapp_continuum(
     else:
         xne = np.zeros(n_layers, dtype=np.float64)
 
-    # DEBUG: Print mass density values
-    if _TRACE_KAPP and logger.level <= logging.INFO:
-        print(f"\n  DEBUG KAPP: Mass density (RHO) values:")
-        print(f"    RHO range: [{rho.min():.6e}, {rho.max():.6e}] g/cm³")
-        print(f"    RHO first 3 layers: {rho[:3]}")
-        print(
-            f"    Expected range: ~1e-6 to 1e-2 g/cm³ for typical stellar atmospheres"
-        )
-
     # HOP: Hydrogen opacity (atlas7v.for line 4596)
     if atmosphere.xnfph is not None:
         logger.info("Computing HOP (hydrogen opacity)...")
@@ -6060,21 +6047,6 @@ def compute_kapp_continuum(
         bhyd = atlas_tables.get("bhyd", np.ones((n_layers, 8), dtype=np.float64))
 
         xne = np.asarray(atmosphere.electron_density, dtype=np.float64)
-
-        # DEBUG: Print population and electron density values
-        if _TRACE_KAPP and logger.level <= logging.INFO:
-            print(f"\n  DEBUG KAPP HOP: Population and electron density values:")
-            if xnfph.shape[1] > 0:
-                print(
-                    f"    XNFPH[:, 0] (H I) range: [{xnfph[:, 0].min():.6e}, {xnfph[:, 0].max():.6e}] atoms/cm³"
-                )
-                print(f"    XNFPH[:, 0] (H I) first 3 layers: {xnfph[:, 0][:3]}")
-            if xnfph.shape[1] > 1:
-                print(
-                    f"    XNFPH[:, 1] (H II) range: [{xnfph[:, 1].min():.6e}, {xnfph[:, 1].max():.6e}] atoms/cm³"
-                )
-            print(f"    XNE range: [{xne.min():.6e}, {xne.max():.6e}] electrons/cm³")
-            print(f"    XNE first 3 layers: {xne[:3]}")
 
         for j in range(nfreq):
             f = freq[j]
@@ -6103,20 +6075,6 @@ def compute_kapp_continuum(
             )
 
             s = h * bnu_j
-
-            # DEBUG: Print cross-section values for first frequency
-            if _TRACE_KAPP and j == 0 and logger.level <= logging.INFO:
-                print(
-                    f"\n  DEBUG KAPP HOP: Cross-section computation (first frequency, f={f:.6e} Hz):"
-                )
-                print(f"    freq3 = 2.815e29 / f³ = {freq3:.6e}")
-                print(
-                    f"    h (cross-section per atom) range: [{h.min():.6e}, {h.max():.6e}] cm²/atom"
-                )
-                print(f"    h (cross-section per atom) first 3 layers: {h[:3]}")
-                print(
-                    f"    Expected h range: ~1e-20 to 1e-15 cm²/atom for typical stellar atmospheres"
-                )
 
             # N=1 to 15 (add bound-free contributions)
             # For N=1-6, use BHYD departure coefficients
@@ -6261,28 +6219,8 @@ def compute_kapp_continuum(
             # H=H*XNFPH(J,1)/RHO(J)  (atlas7v.for line 4706)
             if xnfph.shape[1] > 0:
                 xnfph1 = xnfph[:, 0]
-                h_before = h.copy() if j == 0 else None
                 h = h * xnfph1 / rho
                 s = s * xnfph1 / rho
-
-                # DEBUG: Print opacity computation details for first frequency
-                if _TRACE_KAPP and j == 0 and logger.level <= logging.INFO:
-                    print(f"\n  DEBUG KAPP HOP: Opacity computation (first frequency):")
-                    print(
-                        f"    h (before pop/density) first layer: {h_before[0]:.6e} cm²/atom"
-                    )
-                    print(f"    xnfph1[0] (H I population): {xnfph1[0]:.6e} atoms/cm³")
-                    print(f"    rho[0] (mass density): {rho[0]:.6e} g/cm³")
-                    print(f"    h[0] (after pop/density): {h[0]:.6e} cm²/g")
-                    print(
-                        f"    Expected opacity: ~1e-3 to 1e-1 cm²/g for typical stellar atmospheres"
-                    )
-                    if h[0] > 1e-3:
-                        print(f"    WARNING: Opacity seems too large!")
-                        print(f"      Ratio: {h[0] / 2.72e-3:.2e}x expected value")
-                        print(
-                            f"      Check: h_before={h_before[0]:.6e}, xnfph1={xnfph1[0]:.6e}, rho={rho[0]:.6e}"
-                        )
             else:
                 h = h / rho
                 s = s / rho
@@ -6417,16 +6355,6 @@ def compute_kapp_continuum(
         bhe1 = atlas_tables.get("bhe1", np.ones((n_layers, 29), dtype=np.float64))
         bhe2 = atlas_tables.get("bhe2", np.ones((n_layers, 6), dtype=np.float64))
 
-        # Debug flags: track first frequency (X-ray) and ~300 nm
-        debug_freq_idx_1nm = None
-        debug_freq_idx_300nm = None
-        for j in range(nfreq):
-            wl_nm = C_LIGHT_NM / freq[j]
-            if debug_freq_idx_1nm is None and wl_nm < 1.1:
-                debug_freq_idx_1nm = j
-            if debug_freq_idx_300nm is None and wl_nm > 299.0 and wl_nm < 301.0:
-                debug_freq_idx_300nm = j
-
         for j in range(nfreq):
             f = freq[j]
             wno = waveno[j]
@@ -6436,9 +6364,6 @@ def compute_kapp_continuum(
             ehvkt_j = ehvkt[:, j]
             stim_j = stim[:, j]
             wl_nm = C_LIGHT_NM / f
-
-            # Debug flag for this frequency
-            debug_this = j == debug_freq_idx_1nm or j == debug_freq_idx_300nm
 
             # N=6 to infinity (atlas7v.for line 5513-5516)
             # CRITICAL FIX: Fortran uses HCKT (cm²/s), not HKT (cm)!
@@ -6457,14 +6382,6 @@ def compute_kapp_continuum(
                 * (bhe2[:, 0] if bhe2.shape[1] > 0 else np.ones(n_layers))
             )
             s = h * bnu_j
-
-            if _TRACE_KAPP and debug_this:
-                print(f"\n{'='*80}")
-                print(
-                    f"DEBUG HE1OP: freq_idx={j}, wavelength={wl_nm:.2f} nm, wno={wno:.2f} cm⁻¹"
-                )
-                print(f"{'='*80}")
-                print(f"After N=6 to infinity: h[0] = {h[0]:.6e} cm²/atom")
 
             # Add bound-free contributions (N=5 down to N=1) - all 29 levels
             # BHE1 indices: 29 (5P 1P) down to 1 (1S 1S), BHE2 index: 1 (He II ground state)
@@ -6813,20 +6730,6 @@ def compute_kapp_continuum(
             # N=1 level (BHE1 index 1)
             if wno >= 198310.760 and bhe1.shape[1] > 0:  # 1S 1S
                 x = np.exp(33.32 - 2.0 * freqlg)
-                # DEBUG: Check BHE1/BHE2 values for first frequency
-                if _TRACE_KAPP and j == 0:
-                    print(
-                        f"\nDEBUG HE1OP N=1 LEVEL (first frequency, ~{C_LIGHT_NM/freq[0]:.2f} nm):"
-                    )
-                    print(f"  x = exp(33.32 - 2.0*log(freq)) = {x:.6e} cm²/atom")
-                    print(f"  bhe1[0, 0] = {bhe1[0, 0]:.6e}")
-                    print(f"  bhe2_1[0] = {bhe2_1[0]:.6e}")
-                    print(f"  ehvkt_j[0] = {ehvkt_j[0]:.6e}")
-                    print(
-                        f"  (bhe1 - bhe2*ehvkt)[0] = {bhe1[0, 0] - bhe2_1[0] * ehvkt_j[0]:.6e}"
-                    )
-                    print(f"  xnfphe1[0] = {xnfphe[:, 0][0]:.6e} atoms/cm³")
-                    print(f"  rho[0] = {rho[0]:.6e} g/cm³")
                 a = x * 1.0 * 1.0 * (bhe1[:, 0] - bhe2_1 * ehvkt_j)
                 h = h + a
                 denom = bhe1[:, 0] / np.maximum(bhe2_1, 1e-40) - ehvkt_j
@@ -6835,14 +6738,8 @@ def compute_kapp_continuum(
             # Multiply by populations and normalize (atlas7v.for line 5691-5692)
             if xnfphe.shape[1] > 0:
                 xnfphe1 = xnfphe[:, 0]
-                if _TRACE_KAPP and debug_this:
-                    print(f"Before normalization: h[0] = {h[0]:.6e} cm²/atom")
-                    print(f"  xnfphe1[0] = {xnfphe1[0]:.6e} atoms/cm³")
-                    print(f"  rho[0] = {rho[0]:.6e} g/cm³")
                 h = h * xnfphe1 / rho
                 s = s * xnfphe1 / rho
-                if debug_this:
-                    print(f"After normalization: h[0] = {h[0]:.6e} cm²/g")
 
             # Free-free contribution (atlas7v.for line 5694-5697)
             freqlg_arr = np.full(n_layers, freqlg)
@@ -6883,11 +6780,6 @@ def compute_kapp_continuum(
 
             h = h + a_ff
             s = s + a_ff * bnu_j
-
-            if debug_this:
-                print(f"After free-free: h[0] = {h[0]:.6e} cm²/g")
-                print(f"Final stored: ahe1[0, {j}] = {h[0]:.6e} cm²/g")
-                print(f"{'='*80}\n")
 
             ahe1[:, j] = h
             she1[:, j] = np.where(h > 0, s / h, bnu_j)
@@ -7160,32 +7052,6 @@ def compute_kapp_continuum(
             )
 
             ahmin[:, j] = h_bf + hminff
-
-            debug_hminop_wave = os.environ.get("PY_DEBUG_HMINOP_WAVE")
-            debug_hminop_depth = os.environ.get("PY_DEBUG_HMINOP_DEPTH")
-            if debug_hminop_wave and debug_hminop_depth:
-                try:
-                    wave_val = float(debug_hminop_wave)
-                    depth_idx = max(0, int(debug_hminop_depth) - 1)
-                except ValueError:
-                    wave_val = None
-                    depth_idx = None
-                if (
-                    wave_val is not None
-                    and depth_idx is not None
-                    and depth_idx < n_layers
-                    and abs(wave - wave_val) < 1e-3
-                ):
-                    print(
-                        "PY_DEBUG_HMINOP: "
-                        f"wave={wave:.6f} depth={depth_idx + 1} "
-                        f"XNFPH1={xnfph1[depth_idx]:.6e} "
-                        f"XNE={xne[depth_idx]:.6e} RHO={rho[depth_idx]:.6e} "
-                        f"XHMIN={xhmin[depth_idx]:.6e} "
-                        f"FFTHETA={fftheta[depth_idx]:.6e} "
-                        f"HMINBF={hminbf:.6e} HMINFF={hminff[depth_idx]:.6e} "
-                        f"H(BF)={h_bf[depth_idx]:.6e} AHMIN={ahmin[depth_idx, j]:.6e}"
-                    )
 
             # Source function (atlas7v.for line 5313-5314)
             # SHMIN = (H * BNU(J) * STIM(J) / (BMIN(J) - EHVKT(J)) + HMINFF * BNU(J)) / AHMIN(J)
@@ -8530,88 +8396,6 @@ def compute_kapp_continuum(
     acont = (
         a_base + ahyd + ahmin + axcont + ahe1 + ahe2 + ac1 + amg1 + aal1 + asi1 + afe1
     )
-
-    debug_wave = os.environ.get("PY_DEBUG_KAPP_WAVE")
-    debug_depth = os.environ.get("PY_DEBUG_KAPP_DEPTH")
-    if debug_wave and debug_depth:
-        try:
-            wave_val = float(debug_wave)
-            depth_idx = max(0, int(debug_depth) - 1)
-        except ValueError:
-            wave_val = None
-            depth_idx = None
-        if wave_val is not None and depth_idx is not None and depth_idx < n_layers:
-            wl_idx = int(np.argmin(np.abs(wavelength_nm - wave_val)))
-            if abs(wavelength_nm[wl_idx] - wave_val) < 1e-3:
-                sigmac_val = (
-                    sigh[depth_idx, wl_idx]
-                    + sighe[depth_idx, wl_idx]
-                    + sigel[depth_idx, wl_idx]
-                    + sigh2[depth_idx, wl_idx]
-                    + sigx[depth_idx, wl_idx]
-                )
-                xnfph1_debug = None
-                if atmosphere.xnfph is not None:
-                    xnfph_arr = np.asarray(atmosphere.xnfph, dtype=np.float64)
-                    if xnfph_arr.ndim > 1 and xnfph_arr.shape[1] > 0:
-                        xnfph1_debug = xnfph_arr[depth_idx, 0]
-                if xnfph1_debug is None and atmosphere.xnf_h is not None:
-                    xnfph1_debug = compute_ground_state_hydrogen(
-                        np.asarray(atmosphere.xnf_h, dtype=np.float64), temp
-                    )[depth_idx]
-                xne_debug = (
-                    atmosphere.electron_density[depth_idx]
-                    if atmosphere.electron_density is not None
-                    else np.nan
-                )
-                rho_debug = rho[depth_idx] if rho is not None else np.nan
-                bmin_debug = bmin[depth_idx] if bmin is not None else np.nan
-                bhyd1_debug = (
-                    bhyd[depth_idx, 0] if bhyd is not None and bhyd.shape[1] > 0 else np.nan
-                )
-                print(
-                    "PY_DEBUG_KAPP: "
-                    f"wave={wavelength_nm[wl_idx]:.6f} depth={depth_idx + 1} "
-                    f"A(misc)={a_base[depth_idx, wl_idx]:.6e} "
-                    f"AH2P={ah2p[depth_idx, wl_idx]:.6e} "
-                    f"AHEMIN={ahemin[depth_idx, wl_idx]:.6e} "
-                    f"ALUKE={aluke[depth_idx, wl_idx]:.6e} "
-                    f"AHOT={ahot[depth_idx, wl_idx]:.6e} "
-                    f"AHYD={ahyd[depth_idx, wl_idx]:.6e} "
-                    f"AHMIN={ahmin[depth_idx, wl_idx]:.6e} "
-                    f"AXCONT={axcont[depth_idx, wl_idx]:.6e} "
-                    f"AHE1={ahe1[depth_idx, wl_idx]:.6e} "
-                    f"AHE2={ahe2[depth_idx, wl_idx]:.6e} "
-                    f"AC1={ac1[depth_idx, wl_idx]:.6e} "
-                    f"AMG1={amg1[depth_idx, wl_idx]:.6e} "
-                    f"AAL1={aal1[depth_idx, wl_idx]:.6e} "
-                    f"ASI1={asi1[depth_idx, wl_idx]:.6e} "
-                    f"AFE1={afe1[depth_idx, wl_idx]:.6e} "
-                    f"ACONT={acont[depth_idx, wl_idx]:.6e} "
-                    f"SIGMAC={sigmac_val:.6e} "
-                    f"SIGH={sigh[depth_idx, wl_idx]:.6e} "
-                    f"SIGHE={sighe[depth_idx, wl_idx]:.6e} "
-                    f"SIGEL={sigel[depth_idx, wl_idx]:.6e} "
-                    f"SIGH2={sigh2[depth_idx, wl_idx]:.6e} "
-                    f"XNFPH1={xnfph1_debug:.6e} XNE={xne_debug:.6e} "
-                    f"RHO={rho_debug:.6e} BMIN={bmin_debug:.6e} BHYD1={bhyd1_debug:.6e}"
-                )
-
-    # DEBUG: Print ACONT components across 300-325 nm (layer 0)
-    if _TRACE_KAPP and nfreq > 0:
-        print(f"\n{'='*80}")
-        print("DEBUG ACONT COMPONENTS (300-325 nm, layer 0):")
-        for j in range(nfreq):
-            wl_val = wavelength_nm[j]
-            if wl_val < 300.0 or wl_val > 325.0:
-                continue
-            print(f"  WL={wl_val:10.4f} nm")
-            print(f"    A(misc)={a_base[0, j]:.8E} AHYD={ahyd[0, j]:.8E} AHMIN={ahmin[0, j]:.8E}")
-            print(f"    AXCONT={axcont[0, j]:.8E} AHE1={ahe1[0, j]:.8E} AHE2={ahe2[0, j]:.8E}")
-            print(f"    AC1={ac1[0, j]:.8E} AMG1={amg1[0, j]:.8E} AAL1={aal1[0, j]:.8E}")
-            print(f"    ASI1={asi1[0, j]:.8E} AFE1={afe1[0, j]:.8E}")
-            print(f"    ACONT={acont[0, j]:.8E} cm²/g")
-        print(f"{'='*80}")
 
     # Compute SCONT (atlas7v.for line 4575-4579)
     scont = bnu_all.copy()

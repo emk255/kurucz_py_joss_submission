@@ -73,7 +73,6 @@ class SynthesisConfig:
     n_workers: Optional[int] = (
         None  # Number of parallel workers for radiative transfer (None = auto, 1 = sequential)
     )
-    debug: bool = False  # Enable detailed debug output for JOSH solver
 
     @classmethod
     def from_cli(
@@ -99,7 +98,6 @@ class SynthesisConfig:
         wavelength_subsample: int = 1,
         npz_path: Optional[Path] = None,
         n_workers: Optional[int] = None,
-        debug: bool = False,
         allow_tfort_runtime: bool = False,
     ) -> "SynthesisConfig":
         """Helper for the default CLI entry point."""
@@ -129,7 +127,6 @@ class SynthesisConfig:
             line_filter=line_filter,
             wavelength_subsample=wavelength_subsample,
             n_workers=n_workers,
-            debug=debug,
         )
 
 

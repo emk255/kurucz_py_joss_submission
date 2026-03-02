@@ -23,224 +23,6 @@ from ._pfground_table import (
     PFGROUND_EXPRESSIONS,
 )
 
-# Debug output flags (controlled via environment variables)
-_TRACE_IP = os.environ.get("NM_TRACE_IP", "").strip().lower() in ("1", "true")
-_TRACE_CA_PART = os.environ.get("NM_TRACE_CA_PART", "").strip().lower() in ("1", "true")
-_CA_TRACE_LAYERS_ENV = os.environ.get("NM_TRACE_CA_LAYERS", "").strip()
-_CA_TRACE_LAYERS: Optional[Set[int]] = None
-if _CA_TRACE_LAYERS_ENV:
-    _CA_TRACE_LAYERS = {
-        int(token)
-        for token in _CA_TRACE_LAYERS_ENV.replace(",", " ").split()
-        if token.strip().lstrip("+-").isdigit()
-    } or None
-_CA_TRACE_PATH: Optional[Path] = None
-_TRACE_PFSAHA_WRAPPER = os.environ.get(
-    "NM_TRACE_PFSAHA_WRAPPER", ""
-).strip().lower() in ("1", "true")
-_PFSAHA_WRAPPER_TRACE_PATH: Optional[Path] = None
-
-_TRACE_PFSAHA_MO = False
-_PFSAHA_MO_TRACE_PATH: Optional[Path] = None
-_TRACE_PFSAHA_SI = False
-_PFSAHA_SI_TRACE_PATH: Optional[Path] = None
-_TRACE_PFSAHA_SI_COMPARE = False
-_PFSAHA_SI_COMPARE_PATH: Optional[Path] = None
-_TRACE_PFSAHA_K = False
-_PFSAHA_K_TRACE_PATH: Optional[Path] = None
-_TRACE_PFSAHA_NA = False
-_PFSAHA_NA_TRACE_PATH: Optional[Path] = None
-
-
-def _log_pfsaha_mo(
-    layer_idx: int,
-    temperature: float,
-    electron_density: float,
-    potlow: float,
-    n_start: int,
-    nions: int,
-    nion2: int,
-    ip: np.ndarray,
-    potlo: np.ndarray,
-    part: np.ndarray,
-    fvals: np.ndarray,
-    cf: float,
-    tv: float,
-) -> None:
-    if not _TRACE_PFSAHA_MO:
-        return
-    if layer_idx not in {0, 19, 39, 59, 79}:
-        return
-    global _PFSAHA_MO_TRACE_PATH
-    if _PFSAHA_MO_TRACE_PATH is None:
-        _PFSAHA_MO_TRACE_PATH = Path.cwd() / "pfsaha_mo_debug.log"
-    try:
-        with _PFSAHA_MO_TRACE_PATH.open("a", encoding="utf-8") as fh:
-            fh.write(
-                f"{datetime.utcnow():%Y-%m-%d %H:%M:%S}Z "
-                f"layer={layer_idx+1:03d} T={temperature:.6e} XNE={electron_density:.6e} "
-                f"POTLOW={potlow:.6e} NSTART={n_start} NIONS={nions} NION2={nion2} "
-                f"CF={cf:.6e} TV={tv:.6e}\n"
-            )
-            for i in range(min(3, nion2)):
-                fh.write(
-                    f"  ION={i+1} IP={ip[i]:.6e} POTLO={potlo[i]:.6e} "
-                    f"PART={part[i]:.6e} F={fvals[i]:.6e}\n"
-                )
-    except OSError:
-        pass
-
-
-def _log_pfsaha_na(
-    layer_idx: int,
-    temperature: float,
-    electron_density: float,
-    xnatom_val: float,
-    xntot_val: float,
-    nions: int,
-    nion2: int,
-    mode: int,
-    mode1: int,
-    ip: np.ndarray,
-    potlo: np.ndarray,
-    part: np.ndarray,
-    fvals: np.ndarray,
-    cf: float,
-    tv: float,
-) -> None:
-    if not _TRACE_PFSAHA_NA:
-        return
-    if layer_idx not in {0, 19, 39, 59, 79}:
-        return
-    global _PFSAHA_NA_TRACE_PATH
-    if _PFSAHA_NA_TRACE_PATH is None:
-        _PFSAHA_NA_TRACE_PATH = Path.cwd() / "pfsaha_na_debug_python.log"
-    try:
-        with _PFSAHA_NA_TRACE_PATH.open("a", encoding="utf-8") as fh:
-            fh.write(
-                f"{datetime.utcnow():%Y-%m-%d %H:%M:%S}Z "
-                f"layer={layer_idx+1:03d} MODE={mode} MODE1={mode1} "
-                f"T={temperature:.6e} XNE={electron_density:.6e} "
-                f"XNATOM={xnatom_val:.6e} XNTOT={xntot_val:.6e} "
-                f"CF={cf:.6e} TV={tv:.6e} NION={nions} NION2={nion2}\n"
-            )
-            for i in range(min(3, nion2)):
-                fh.write(
-                    f"  ION={i+1} PART={part[i]:.17e} F={fvals[i]:.17e} "
-                    f"IP={ip[i]:.6e} POTLO={potlo[i]:.6e}\n"
-                )
-    except OSError:
-        pass
-
-
-def _log_pfsaha_si(
-    layer_idx: int,
-    temperature: float,
-    electron_density: float,
-    potlow: float,
-    n_start: int,
-    nions: int,
-    nion2: int,
-    ip: np.ndarray,
-    potlo: np.ndarray,
-    part: np.ndarray,
-    fvals: np.ndarray,
-) -> None:
-    if not _TRACE_PFSAHA_SI:
-        return
-    if layer_idx not in {0, 19, 39, 59, 79}:
-        return
-    global _PFSAHA_SI_TRACE_PATH
-    if _PFSAHA_SI_TRACE_PATH is None:
-        _PFSAHA_SI_TRACE_PATH = Path.cwd() / "pfsaha_si_debug.log"
-    try:
-        with _PFSAHA_SI_TRACE_PATH.open("a", encoding="utf-8") as fh:
-            fh.write(
-                f"{datetime.utcnow():%Y-%m-%d %H:%M:%S}Z "
-                f"layer={layer_idx+1:03d} T={temperature:.6e} XNE={electron_density:.6e} "
-                f"POTLOW={potlow:.6e} NSTART={n_start} NIONS={nions} NION2={nion2}\n"
-            )
-            for i in range(min(3, nion2)):
-                fh.write(
-                    f"  ION={i+1} IP={ip[i]:.6e} POTLO={potlo[i]:.6e} "
-                    f"PART={part[i]:.6e} F={fvals[i]:.6e}\n"
-                )
-    except OSError:
-        pass
-
-
-def _log_pfsaha_si_compare(
-    layer_idx: int,
-    temperature: float,
-    electron_density: float,
-    cf: float,
-    tv: float,
-    potlow: float,
-    part: np.ndarray,
-    fvals: np.ndarray,
-) -> None:
-    if not _TRACE_PFSAHA_SI_COMPARE:
-        return
-    if layer_idx not in {0, 19, 39, 59, 79}:
-        return
-    global _PFSAHA_SI_COMPARE_PATH
-    if _PFSAHA_SI_COMPARE_PATH is None:
-        _PFSAHA_SI_COMPARE_PATH = Path.cwd() / "pfsaha_si_compare.log"
-    try:
-        with _PFSAHA_SI_COMPARE_PATH.open("a", encoding="utf-8") as fh:
-            fh.write(
-                f"{datetime.utcnow():%Y-%m-%d %H:%M:%S}Z "
-                f"layer={layer_idx+1:03d} T={temperature:.6e} XNE={electron_density:.6e} "
-                f"CF={cf:.6e} TV={tv:.6e} POTLOW={potlow:.6e}\n"
-            )
-            for i in range(min(4, len(fvals))):
-                part_val = part[i] if i < len(part) else float("nan")
-                f_val = fvals[i] if i < len(fvals) else float("nan")
-                f_over_part = (
-                    f_val / part_val if part_val not in (0.0, np.nan) else float("nan")
-                )
-                fh.write(
-                    f"  ION={i+1} PART={part_val:.6e} F={f_val:.6e} "
-                    f"F_OVER_PART={f_over_part:.6e}\n"
-                )
-    except OSError:
-        pass
-
-
-def _log_pfsaha_k(
-    layer_idx: int,
-    temperature: float,
-    electron_density: float,
-    potlow: float,
-    part: np.ndarray,
-    fvals: np.ndarray,
-) -> None:
-    if not _TRACE_PFSAHA_K:
-        return
-    if layer_idx not in {0, 19, 39, 59, 79}:
-        return
-    global _PFSAHA_K_TRACE_PATH
-    if _PFSAHA_K_TRACE_PATH is None:
-        _PFSAHA_K_TRACE_PATH = Path.cwd() / "pfsaha_k_debug.log"
-    try:
-        with _PFSAHA_K_TRACE_PATH.open("a", encoding="utf-8") as fh:
-            fh.write(
-                f"{datetime.utcnow():%Y-%m-%d %H:%M:%S}Z "
-                f"layer={layer_idx+1:03d} T={temperature:.6e} XNE={electron_density:.6e} "
-                f"POTLOW={potlow:.6e}\n"
-            )
-            for i in range(min(2, len(fvals))):
-                part_val = part[i] if i < len(part) else float("nan")
-                f_val = fvals[i] if i < len(fvals) else float("nan")
-                f_over_part = (
-                    f_val / part_val if part_val not in (0.0, np.nan) else float("nan")
-                )
-                fh.write(
-                    f"  ION={i+1} PART={part_val:.6e} F={f_val:.6e} "
-                    f"F_OVER_PART={f_over_part:.6e}\n"
-                )
-    except OSError:
-        pass
 
 
 def _compute_xnfpmol(
@@ -368,43 +150,6 @@ def _compute_xnfpmol(
     return xnfpmol
 
 
-_PFSAHA_WRAPPER_TRACE_ELEMS_ENV = os.environ.get(
-    "NM_TRACE_PFSAHA_WRAPPER_ELEMENTS", ""
-).strip()
-_PFSAHA_WRAPPER_TRACE_ELEMS: Optional[Set[int]] = None
-if _PFSAHA_WRAPPER_TRACE_ELEMS_ENV:
-    _PFSAHA_WRAPPER_TRACE_ELEMS = {
-        int(token)
-        for token in _PFSAHA_WRAPPER_TRACE_ELEMS_ENV.replace(",", " ").split()
-        if token.strip().lstrip("+-").isdigit()
-    } or None
-else:
-    _PFSAHA_WRAPPER_TRACE_ELEMS = {1, 6, 7, 8, 9, 20}
-
-_PFSAHA_TRACE_ELEMS_ENV = os.environ.get("NM_TRACE_PFSAHA_ELEMENTS", "").strip()
-_PFSAHA_TRACE_ELEMS: Set[int] = (
-    {
-        int(token)
-        for token in _PFSAHA_TRACE_ELEMS_ENV.replace(",", " ").split()
-        if token.strip().lstrip("+-").isdigit()
-    }
-    if _PFSAHA_TRACE_ELEMS_ENV
-    else set()
-)
-
-_PFSAHA_TRACE_LAYERS_ENV = os.environ.get("NM_TRACE_PFSAHA_LAYERS", "").strip()
-_PFSAHA_TRACE_LAYERS: Optional[Set[int]] = None
-if _PFSAHA_TRACE_LAYERS_ENV:
-    parsed_layers = {
-        int(token)
-        for token in _PFSAHA_TRACE_LAYERS_ENV.replace(",", " ").split()
-        if token.strip().lstrip("+-").isdigit()
-    }
-    _PFSAHA_TRACE_LAYERS = parsed_layers or None
-
-_PFSAHA_TRACE_PATH = Path(
-    os.environ.get("NM_TRACE_PFSAHA_PATH", "logs/pfsaha_debug_python.log")
-).resolve()
 _PFGROUND_WARNED: Set[int] = set()
 
 # Constants matching Fortran exactly
@@ -563,8 +308,6 @@ _IFPRES = 0
 # When IFMOL=1, POPS calls NMOLEC (complex molecular equilibrium)
 # The DATA statement default is 0, but xnfpelsyn sets IFMOL=1 for spectrum synthesis
 _IFMOL = 1  # Default: molecules ON (matching Fortran xnfpelsyn behavior)
-_NMOLEC_TRACE_PATH: Optional[Path] = None
-
 # Storage for NMOLEC results (molecular equilibrium)
 # xnz[j, k] = atomic number density for element with idequa[k] at layer j
 # This accounts for atoms locked in molecules (e.g., C in CO)
@@ -580,75 +323,6 @@ _NMOLEC_KCOMPS: Optional[np.ndarray] = None
 _NMOLEC_EQUIL: Optional[np.ndarray] = None
 
 
-def _log_nmolec_state(
-    label: str, electron_density: np.ndarray, xnatom: np.ndarray
-) -> None:
-    """Append a simple snapshot of XNE/XNATOM to nmo_trace.log for debugging."""
-    global _NMOLEC_TRACE_PATH
-    if _NMOLEC_TRACE_PATH is None:
-        _NMOLEC_TRACE_PATH = Path.cwd() / "logs/nmo_trace.log"
-    try:
-        with _NMOLEC_TRACE_PATH.open("a", encoding="utf-8") as fh:
-            fh.write(
-                f"{datetime.utcnow():%Y-%m-%d %H:%M:%S}Z {label}: "
-                f"XNE0={electron_density[0]:.6e} "
-                f"XNATOM0={xnatom[0]:.6e}\n"
-            )
-    except OSError:
-        pass
-
-
-def _should_trace_ca_layer(layer_idx: int) -> bool:
-    if not _TRACE_CA_PART:
-        return False
-    if _CA_TRACE_LAYERS is None:
-        return True
-    return layer_idx in _CA_TRACE_LAYERS
-
-
-def _log_ca_partition(
-    layer_idx: int,
-    ion_label: str,
-    ion_idx: int,
-    temperature: float,
-    base_part: float,
-    departure_sum: float,
-    extra_sum: float,
-    final_part: float,
-    g_value: float,
-    d1_value: float,
-) -> None:
-    if not _should_trace_ca_layer(layer_idx):
-        return
-    global _CA_TRACE_PATH
-    if _CA_TRACE_PATH is None:
-        _CA_TRACE_PATH = Path.cwd() / "pfsa_ca_trace.log"
-    try:
-        with _CA_TRACE_PATH.open("a", encoding="utf-8") as fh:
-            fh.write(
-                "PFSA_CA "
-                f"layer={layer_idx:03d} ion_idx={ion_idx:02d} label={ion_label} "
-                f"T={temperature:.6e} "
-                f"base={base_part:.6e} depart_sum={departure_sum:.6e} "
-                f"extra_sum={extra_sum:.6e} final_part={final_part:.6e} "
-                f"G={g_value:.6e} D1={d1_value:.6e}\n"
-            )
-    except OSError:
-        pass
-
-
-def _log_pfsa_wrapper(message: str) -> None:
-    """Append PFSAHA wrapper diagnostics when tracing is enabled."""
-    if not _TRACE_PFSAHA_WRAPPER:
-        return
-    global _PFSAHA_WRAPPER_TRACE_PATH
-    if _PFSAHA_WRAPPER_TRACE_PATH is None:
-        _PFSAHA_WRAPPER_TRACE_PATH = Path.cwd() / "pfsaha_wrapper_debug.log"
-    try:
-        with _PFSAHA_WRAPPER_TRACE_PATH.open("a", encoding="utf-8") as fh:
-            fh.write(f"{datetime.utcnow():%Y-%m-%d %H:%M:%S}Z {message}\n")
-    except OSError:
-        pass
 
 
 def nelect_exact(
@@ -1107,11 +781,6 @@ def load_fortran_data(data_path: Optional[Path] = None) -> None:
     NNN = nnn_data
     ATMASS = atmass_data
 
-    print(f"Loaded POTION: {np.count_nonzero(POTION)} non-zero values")
-    print(f"Loaded NNN: shape {NNN.shape if NNN is not None else 'None'}")
-    print(
-        f"Loaded ATMASS: {np.count_nonzero(ATMASS) if ATMASS is not None else 0} non-zero values"
-    )
 
     # Load PFIRON data (separate file)
     pfiron_path = Path(__file__).parent.parent / "data" / "pfiron_data.npz"
@@ -1131,7 +800,6 @@ def load_fortran_data(data_path: Optional[Path] = None) -> None:
             "PFIRON data file is missing required arrays (pftab/potlo/potlolog)"
         )
 
-    print(f"Loaded PFIRON: PFTAB shape {PFTAB.shape}")
 
     # Load KAPP tables (separate file)
     kapp_path = Path(__file__).parent.parent / "data" / "kapp_tables.npz"
@@ -1149,9 +817,6 @@ def load_fortran_data(data_path: Optional[Path] = None) -> None:
     if TABT_KAPP is None or TABP_KAPP is None or TABKAP_KAPP is None:
         raise ValueError("KAPP data file missing tabt/tabp/ktab arrays")
 
-    print(
-        f"Loaded KAPP tables: TABT={TABT_KAPP.shape}, TABP={TABP_KAPP.shape}, TABKAP={TABKAP_KAPP.shape}"
-    )
 
 
 def pfground(nelion: int, temperature: float) -> float:
@@ -1256,23 +921,6 @@ def pfiron(iz: int, ion: int, tlog8: float, potlow8: float) -> float:
             f * PFTAB[low - 1, it_idx, ion_idx, elem_idx]
             + (1.0 - f) * PFTAB[low - 1, max(0, it_idx - 1), ion_idx, elem_idx]
         )
-
-    # DEBUG: Trace Fe partition function at low temperature
-    _DEBUG_PFIRON = os.environ.get("DEBUG_PFIRON", "0") == "1"
-    if _DEBUG_PFIRON and iz == 26 and ion == 1 and tlog8 < 3.5:
-        print(f"DEBUG PFIRON Fe I: tlog8={tlog8:.4f}, potlow8={potlow8:.2f} cm⁻¹")
-        print(f"  it={it}, it_idx={it_idx}, f={f:.4f}")
-        print(f"  low={low}, POTLO_PFIRON[0]={POTLO_PFIRON[0]:.2f}")
-        if low > 0:
-            print(f"  p={p:.4f}, POTLOLOG_PFIRON[low-1]={POTLOLOG_PFIRON[low-1]:.4f}")
-        print(
-            f"  PFTAB values at [low={low}, it_idx={it_idx}, ion_idx={ion_idx}, elem_idx={elem_idx}]:"
-        )
-        print(f"    PFTAB[low, it_idx] = {PFTAB[low, it_idx, ion_idx, elem_idx]:.4f}")
-        print(
-            f"    PFTAB[low, it_idx-1] = {PFTAB[low, max(0, it_idx-1), ion_idx, elem_idx]:.4f}"
-        )
-        print(f"  Result: pf = {pf:.4f}")
 
     return float(pf)
 
@@ -1461,31 +1109,8 @@ def _pfsaha_exact_python(
                 if IP[ion_idx - 1] == 0.0 and potion_idx_python > 0:
                     IP_val_cm_fallback = POTION[potion_idx_python - 1]
                     IP[ion_idx - 1] = IP_val_cm_fallback / EV_TO_CM
-
-                    # DEBUG: Log when fallback is used
-                    if _TRACE_IP and layer_idx == 0 and iz == 2:
-                        print(f"DEBUG IP lookup: iz={iz}, ion_idx={ion_idx}")
-                        print(
-                            f"  Fortran INDEX = {potion_idx_fortran}, Python index = {potion_idx_python}"
-                        )
-                        print(
-                            f"  POTION[{potion_idx_python}] = {IP_val_cm:.6e} cm⁻¹ (zero, using fallback)"
-                        )
-                        print(
-                            f"  POTION[{potion_idx_python-1}] = {IP_val_cm_fallback:.6e} cm⁻¹"
-                        )
-                        print(f"  IP = {IP[ion_idx - 1]:.6e} eV")
             else:
                 IP[ion_idx - 1] = 0.0
-                # DEBUG: Log when index is out of bounds
-                if _TRACE_IP and layer_idx == 0 and iz == 2:
-                    print(f"DEBUG IP lookup: iz={iz}, ion_idx={ion_idx}")
-                    print(
-                        f"  Fortran INDEX = {potion_idx_fortran}, Python index = {potion_idx_python}"
-                    )
-                    print(
-                        f"  ERROR: Python index {potion_idx_python} out of bounds [0, {len(POTION)})"
-                    )
 
             # Partition function computation
             # Check for Fe-group elements first (from atlas7v.for lines 3604-3608)
@@ -1722,18 +1347,6 @@ def _pfsaha_exact_python(
                     handled = True
                     G = 4.0
                     D1 = 109734.82 / 4.5 / 4.5 * HCKT_val
-                    _log_ca_partition(
-                        layer_idx=layer_idx,
-                        ion_label="CaI",
-                        ion_idx=ion_idx,
-                        temperature=T,
-                        base_part=float(base_part),
-                        departure_sum=float(departure_sum),
-                        extra_sum=float(extra_sum),
-                        final_part=float(PART[ion_idx - 1]),
-                        g_value=float(G),
-                        d1_value=float(D1),
-                    )
 
                 elif nnn_col_fortran == 97:  # Ca II (20.01) - GO TO 1172
                     # From atlas7v.for lines 3816-3826
@@ -1750,18 +1363,6 @@ def _pfsaha_exact_python(
                     handled = True
                     G = 2.0
                     D1 = 109734.83 / 4.5 / 4.5 * HCKT_val
-                    _log_ca_partition(
-                        layer_idx=layer_idx,
-                        ion_label="CaII",
-                        ion_idx=ion_idx,
-                        temperature=T,
-                        base_part=float(base_part * 2.0),
-                        departure_sum=float(departure_sum),
-                        extra_sum=float(extra_sum),
-                        final_part=float(PART[ion_idx - 1]),
-                        g_value=float(G),
-                        d1_value=float(D1),
-                    )
 
                 elif nnn_col_fortran == 367:  # O I (8.00) - GO TO 1180
                     # From atlas7v.for lines 3827-3837
@@ -1876,31 +1477,6 @@ def _pfsaha_exact_python(
                         P2 = float(K1_next) * SCALE[scale_idx_next]
 
                     PART[ion_idx - 1] = max(PMIN, P1 + (P2 - P1) * DT)
-                    if (
-                        _TRACE_PFSAHA_MO
-                        and iz == 42
-                        and ion_idx == 2
-                        and layer_idx in {39}
-                    ):
-                        global _PFSAHA_MO_TRACE_PATH
-                        if _PFSAHA_MO_TRACE_PATH is None:
-                            _PFSAHA_MO_TRACE_PATH = Path.cwd() / "pfsaha_mo_debug.log"
-                        try:
-                            with _PFSAHA_MO_TRACE_PATH.open(
-                                "a", encoding="utf-8"
-                            ) as fh:
-                                fh.write(
-                                    "  NNN_DEBUG: "
-                                    f"layer={layer_idx+1:03d} "
-                                    f"nnn_col_fortran={nnn_col_fortran} "
-                                    f"nnn_i={nnn_i} K1={K1} K3={K3} "
-                                    f"KSCALE={KSCALE} scale_idx={scale_idx} "
-                                    f"IT={IT} DT={DT:.6e} "
-                                    f"P1={P1:.6e} P2={P2:.6e} "
-                                    f"PART={PART[ion_idx - 1]:.6e}\n"
-                                )
-                        except OSError:
-                            pass
                 elif not handled:
                     PART[ion_idx - 1] = 1.0
 
@@ -1981,39 +1557,16 @@ def _pfsaha_exact_python(
         # This is the standard Saha prefactor: 2 * (2πm_e k/h²)^{3/2} * T^{3/2} / n_e
         CF = 2.0 * 2.4148e15 * T * np.sqrt(T) / XNE_val
 
-        # DEBUG: Log PFSAHA intermediate values
-        debug_h = layer_idx == 0 and iz == 1 and mode == 12
-        debug_f = layer_idx == 0 and iz == 9 and mode == 12
-        trace_elem = (
-            iz in _PFSAHA_TRACE_ELEMS
-            and (_PFSAHA_TRACE_LAYERS is None or layer_idx in _PFSAHA_TRACE_LAYERS)
-        )
-        debug_pfsa = debug_h or debug_f or trace_elem
-        if debug_pfsa:
-            _PFSAHA_TRACE_PATH.parent.mkdir(parents=True, exist_ok=True)
-            with _PFSAHA_TRACE_PATH.open("a") as f:
-                f.write(
-                    f"PY_PFSAHA: layer={layer_idx} iz={iz}, nion={nion}, nion2={nion2}, mode={mode}\n"
-                )
-                f.write(f"PY_PFSAHA: T={T:.4E}, XNE={XNE_val:.4E}, TV={TV:.4E}\n")
-                f.write(f"PY_PFSAHA: CF={CF:.4E}\n")
-                f.write(f"PY_PFSAHA: PART[0]={PART[0]:.4E}, PART[1]={PART[1]:.4E}")
-                if nion2 >= 3:
-                    f.write(f", PART[2]={PART[2]:.4E}")
-                f.write("\n")
-                f.write(f"PY_PFSAHA: IP[0]={IP[0]:.4E}, POTLO[0]={POTLO[0]:.4E}")
-                if nion2 >= 2:
-                    f.write(f", IP[1]={IP[1]:.4E}, POTLO[1]={POTLO[1]:.4E}")
-                f.write("\n")
-
-        # Fast path: Use Numba kernel when debugging is disabled
-        use_numba_saha = not debug_pfsa
+        # Use Python path for H (iz=1) and F (iz=9) at layer 0 mode 12 to preserve
+        # the exact numerical behavior established during development.
+        use_python_saha = layer_idx == 0 and iz in (1, 9) and mode == 12
+        use_numba_saha = not use_python_saha
 
         if use_numba_saha:
             # Use Numba kernel for Saha equation F computation
             _compute_saha_f_kernel(F, PART, IP, POTLO, CF, TV, nion2)
         else:
-            # Python path with debugging
+            # Python path
             F[0] = 1.0  # F(1) = 1
 
             # Compute F(ION) for ION = 2 to NION2
@@ -2028,35 +1581,6 @@ def _pfsaha_exact_python(
                     exp_arg = -(ip_prev - potlo_prev) / TV
                     exp_val = np.exp(exp_arg)
                     F[ion_idx - 1] = CF * part_curr / part_prev * exp_val
-
-                    # DEBUG: Log F calculation for H (iz=1) and Fluorine (iz=9)
-                    if debug_pfsa and ion_idx <= 3:
-                        _PFSAHA_TRACE_PATH.parent.mkdir(parents=True, exist_ok=True)
-                        with _PFSAHA_TRACE_PATH.open("a") as f:
-                            f.write(
-                                f"PY_PFSAHA: F[{ion_idx-1}] before norm: part_curr={part_curr:.4E}, "
-                                f"part_prev={part_prev:.4E}, ip_prev={ip_prev:.4E}, "
-                                f"potlo_prev={potlo_prev:.4E}\n"
-                            )
-                            f.write(
-                                f"PY_PFSAHA: exp_arg={exp_arg:.4E}, exp_val={exp_val:.4E}\n"
-                            )
-                            f.write(
-                                f"PY_PFSAHA: F[{ion_idx-1}]={F[ion_idx - 1]:.4E} (before normalization)\n"
-                            )
-                            # CRITICAL DEBUG: Check which IP is being used
-                            f.write(
-                                f"PY_PFSAHA: DEBUG ion_idx={ion_idx}, using IP[{ion_idx-2}]={ip_prev:.6E} eV, "
-                                f"PART[{ion_idx-1}]={part_curr:.6E}, PART[{ion_idx-2}]={part_prev:.6E}\n"
-                            )
-                            # Check POTION index
-                            potion_idx_fortran_check = (
-                                get_potion_index(iz, ion_idx - 1) if ion_idx > 1 else 0
-                            )
-                            f.write(
-                                f"PY_PFSAHA: DEBUG IP[{ion_idx-2}] comes from POTION[{potion_idx_fortran_check-1}] "
-                                f"(Fortran index {potion_idx_fortran_check})\n"
-                            )
                 else:
                     F[ion_idx - 1] = 0.0
 
@@ -2067,32 +1591,8 @@ def _pfsaha_exact_python(
                 F[0] = 1.0 + F[L - 1] * F[0]
             F[0] = 1.0 / F[0]
 
-            # DEBUG: Log normalization for H and Fluorine
-            if debug_pfsa:
-                _PFSAHA_TRACE_PATH.parent.mkdir(parents=True, exist_ok=True)
-                with _PFSAHA_TRACE_PATH.open("a") as f:
-                    f.write(
-                        f"PY_PFSAHA: After normalization: F[0]={F[0]:.4E}, F[1]={F[1]:.4E}"
-                    )
-                    if nion2 >= 3:
-                        f.write(f", F[2]={F[2]:.4E}")
-                    f.write("\n")
-
             for ion_idx in range(2, nion2 + 1):
                 F[ion_idx - 1] = F[ion_idx - 2] * F[ion_idx - 1]
-
-        # DEBUG: Log final F values for H and Fluorine
-        if debug_pfsa:
-            _PFSAHA_TRACE_PATH.parent.mkdir(parents=True, exist_ok=True)
-            with _PFSAHA_TRACE_PATH.open("a") as f:
-                f.write(f"PY_PFSAHA Mol26: Final F: F[0]={F[0]:.4E}, F[1]={F[1]:.4E}")
-                if nion2 >= 3:
-                    f.write(f", F[2]={F[2]:.4E}")
-                f.write(f"\n  PART[0]={PART[0]:.4E}, PART[1]={PART[1]:.4E}")
-                if nion2 >= 3:
-                    f.write(f", PART[2]={PART[2]:.4E}")
-                ip1_val = IP[1] if nion2 >= 2 else 0.0
-                f.write(f"\n  IP[0]={IP[0]:.4E}, IP[1]={ip1_val:.4E}, CF={CF:.4E}\n")
 
         # Store results based on mode
         if mode < 10:
@@ -2114,126 +1614,12 @@ def _pfsaha_exact_python(
                 # This gives: F[1]*1 + F[2]*2 + ... = F(2)*1 + F(3)*2 + ... (matching Fortran)
                 elec_sum = sum(F[i] * float(i) for i in range(1, nion2))
                 answer[layer_idx, 0] = elec_sum
-
-                # DEBUG: Log if result is suspiciously small or large, or for He
-                if layer_idx == 0 and (iz <= 2 or elec_sum < 1e-50 or elec_sum > 1e10):
-                    print(
-                        f"DEBUG PFSAHA mode 4: layer={layer_idx}, iz={iz}, nion={nion}, nion2={nion2}"
-                    )
-                    print(f"  T={T:.2f} K, XNE={XNE_val:.6e}, CF={CF:.6e}")
-                    print(f"  F values: {[F[i] for i in range(min(6, nion2))]}")
-                    print(f"  PART values: {[PART[i] for i in range(min(6, nion2))]}")
-                    print(
-                        f"  elec_sum calculation: sum(F[i]*i for i in range(1, {nion2}))"
-                    )
-                    for i in range(1, min(nion2, 6)):
-                        print(
-                            f"    F[{i}] * {i} = {F[i]:.6e} * {i} = {F[i] * float(i):.6e}"
-                        )
-                    print(f"  elec_sum={elec_sum:.6e}")
         else:
             # Return all ions
             # CRITICAL FIX: Store up to nion2 (maximum ion calculated), not just nion
             # Fortran stores F(1) to F(NION), but NION2 may be larger than NION
             # For mode 12, we need all calculated F values (up to nion2) to be available
             # This matches Fortran's behavior where F values up to NION2 are calculated
-
-            # DEBUG: Trace Fe partition functions at layer 0
-            _DEBUG_PFSAHA_FE = os.environ.get("DEBUG_PFSAHA_FE", "0") == "1"
-            if _DEBUG_PFSAHA_FE and iz == 26 and layer_idx == 0:
-                print(f"\nDEBUG PFSAHA Fe (layer 0):")
-                print(f"  T={T:.2f} K, TLOG={TLOG_val:.4f}, XNE={XNE_val:.6e}")
-                print(f"  CF={CF:.6e}, nion={nion}, nion2={nion2}")
-                print(
-                    f"  F values (ionization fractions before normalization by PART):"
-                )
-                for i in range(min(4, nion2)):
-                    print(f"    F[{i}] = {F[i]:.6e}")
-                print(f"  PART values (partition functions):")
-                for i in range(min(4, nion2)):
-                    print(f"    PART[{i}] = {PART[i]:.6e}")
-                print(f"  F/PART (what's returned for mode1=1):")
-                for i in range(min(4, nion2)):
-                    if PART[i] > 0:
-                        print(f"    F[{i}]/PART[{i}] = {F[i]/PART[i]:.6e}")
-                    else:
-                        print(f"    F[{i}]/PART[{i}] = inf (PART=0)")
-                print(f"  IP values:")
-                for i in range(min(4, nion2)):
-                    print(f"    IP[{i}] = {IP[i]:.4f} eV")
-                print(f"  POTLO values (lowered ionization potential):")
-                for i in range(min(4, nion2)):
-                    print(f"    POTLO[{i}] = {POTLO[i]:.4f} eV")
-
-            if mode1 == 1:
-                if iz == 42:
-                    _log_pfsaha_mo(
-                        layer_idx=layer_idx,
-                        temperature=T,
-                        electron_density=XNE_val,
-                        potlow=POTLOW,
-                        n_start=n_start,
-                        nions=nions,
-                        nion2=nion2,
-                        ip=IP,
-                        potlo=POTLO,
-                        part=PART,
-                        fvals=F,
-                        cf=CF,
-                        tv=TV,
-                    )
-            if mode1 == 2 and iz == 11:
-                xntot_val = gas_pressure[layer_idx] / tk[layer_idx]
-                _log_pfsaha_na(
-                    layer_idx=layer_idx,
-                    temperature=T,
-                    electron_density=XNE_val,
-                    xnatom_val=xnatom[layer_idx],
-                    xntot_val=xntot_val,
-                    nions=nions,
-                    nion2=nion2,
-                    mode=mode,
-                    mode1=mode1,
-                    ip=IP,
-                    potlo=POTLO,
-                    part=PART,
-                    fvals=F,
-                    cf=CF,
-                    tv=TV,
-                )
-                if iz == 14:
-                    _log_pfsaha_si(
-                        layer_idx=layer_idx,
-                        temperature=T,
-                        electron_density=XNE_val,
-                        potlow=POTLOW,
-                        n_start=n_start,
-                        nions=nions,
-                        nion2=nion2,
-                        ip=IP,
-                        potlo=POTLO,
-                        part=PART,
-                        fvals=F,
-                    )
-                    _log_pfsaha_si_compare(
-                        layer_idx=layer_idx,
-                        temperature=T,
-                        electron_density=XNE_val,
-                        cf=CF,
-                        tv=TV,
-                        potlow=POTLOW,
-                        part=PART,
-                        fvals=F,
-                    )
-                if iz == 19:
-                    _log_pfsaha_k(
-                        layer_idx=layer_idx,
-                        temperature=T,
-                        electron_density=XNE_val,
-                        potlow=POTLOW,
-                        part=PART,
-                        fvals=F,
-                    )
 
             if mode1 == 1:
                 for ion_idx in range(nion2):
@@ -2279,14 +1665,6 @@ def pops_exact(
     """
     global _ITEMP, _ITEMP1, _IFPRES, _IFMOL
 
-    if os.environ.get("NM_TRACE_XNE_LAYER"):
-        trace_path = Path.cwd() / "logs" / "nmolec_call.log"
-        trace_path.parent.mkdir(parents=True, exist_ok=True)
-        with trace_path.open("a", encoding="utf-8") as fh:
-            fh.write(
-                f"PY_POPS_ENTRY: IFPRES={_IFPRES} IFMOL={_IFMOL} ITEMP={_ITEMP} ITEMP1={_ITEMP1}\n"
-            )
-
     # Match Fortran line 242: ITEMP=ITEMP+1 (called before first POPS in xnfpelsyn.for)
     # We increment on first call to match the effect
     if _ITEMP == 0:
@@ -2301,7 +1679,6 @@ def pops_exact(
     if _IFPRES == 1 and _ITEMP != _ITEMP1:
         if _IFMOL == 0:
             # IFMOL=0: Call NELECT (simpler atomic-only XNE iteration)
-            _log_nmolec_state("before_nelect", electron_density, xnatom)
             try:
                 nelect_exact(
                     temperature=temperature,
@@ -2316,12 +1693,10 @@ def pops_exact(
                     xabund=xabund,
                     departure_tables=departure_tables,
                 )
-                _log_nmolec_state("after_nelect", electron_density, xnatom)
             except Exception as e:
                 warnings.warn(f"NELECT failed in POPS: {e}. Using initial XNE/XNATOM.")
         else:
             # IFMOL=1: Call NMOLEC (complex molecular equilibrium)
-            _log_nmolec_state("before_nmolec", electron_density, xnatom)
             # Call NMOLEC to compute molecular XNATOM (modifies xnatom and electron_density in-place)
             try:
                 from synthe_py.tools.nmolec_exact import nmolec_exact
@@ -2355,21 +1730,7 @@ def pops_exact(
 
                     def pfsaha_wrapper(j, iz, nion, mode, frac, nlte_on):
                         """Wrapper for PFSAHA that uses current electron_density (updated by NMOLEC)."""
-                        # Ensure we start from a clean slate before each PFSAHA invocation
                         answer_full.fill(0.0)
-                        trace_call = (
-                            _TRACE_PFSAHA_WRAPPER
-                            and (
-                                _PFSAHA_WRAPPER_TRACE_ELEMS is None
-                                or iz in _PFSAHA_WRAPPER_TRACE_ELEMS
-                            )
-                            and mode >= 10
-                        )
-                        if trace_call:
-                            _log_pfsa_wrapper(
-                                f"PFWRAP start: layer={j} iz={iz} nion={nion} mode={mode} "
-                                f"xne={electron_density[j]:.6e}"
-                            )
                         pfsaha_exact(
                             j=0,  # Process all layers
                             iz=iz,
@@ -2390,15 +1751,6 @@ def pops_exact(
                         )
                         row = answer_full[j, :]
                         frac[j, :] = row
-                        if trace_call:
-                            _log_pfsa_wrapper(
-                                "PFWRAP result: "
-                                f"row0={row[0]:.6e} row1={row[1]:.6e} any_nonzero={np.any(row != 0.0)}"
-                            )
-                            if not np.any(row):
-                                _log_pfsa_wrapper(
-                                    f"PFWRAP warning: zero row detected for iz={iz} nion={nion}"
-                                )
 
                     # Call NMOLEC (modifies xnatom and electron_density in-place)
                     # Store atomic XNATOM for reference
@@ -2433,11 +1785,6 @@ def pops_exact(
                     # Continuation mode caused Layer 0 to inherit wrong XN values from hot layers,
                     # leading to XN[0] ≈ XNTOT instead of the correct XNTOT/2
                     use_continuation = os.environ.get("NM_USE_CONTINUATION", "0") == "1"
-                    if os.environ.get("NM_TRACE_XNE_LAYER"):
-                        trace_path = Path.cwd() / "logs" / "nmolec_call.log"
-                        trace_path.parent.mkdir(parents=True, exist_ok=True)
-                        with trace_path.open("a", encoding="utf-8") as fh:
-                            fh.write("PY_NMOLEC_CALL: invoking nmolec_exact\n")
                     # Store NMOLEC inputs/results for POPS molecular branch
                     global _NMOLEC_IDEQUA
                     global _NMOLEC_NEQUA
@@ -2500,7 +1847,6 @@ def pops_exact(
                         :
                     ]  # RE-ENABLED - matches Fortran atlas7v.for line 5845
                     # electron_density was already modified in-place by NMOLEC
-                    _log_nmolec_state("after_nmolec", electron_density, xnatom)
 
                     # Store NMOLEC results
                     _NMOLEC_XNZ = nmolec_xnz.copy()
@@ -2676,16 +2022,6 @@ def pops_exact(
                 answer[layer_idx, ion_idx] * xnatom[layer_idx] * xabund[iz - 1]
             )
 
-    # DEBUG: Trace Fe populations at layer 0
-    _DEBUG_POPS_FE = os.environ.get("DEBUG_POPS_FE", "0") == "1"
-    if _DEBUG_POPS_FE and iz == 26:
-        print(f"\nDEBUG POPS Fe final populations (layer 0):")
-        print(f"  XNATOM[0] = {xnatom[0]:.6e}")
-        print(f"  XABUND[Fe] = {xabund[iz-1]:.6e}")
-        print(f"  XNATOM * XABUND = {xnatom[0] * xabund[iz-1]:.6e}")
-        print(f"  answer[0, 0] (F/PART for Fe I) = {answer[0, 0]:.6e}")
-        print(f"  Fe I pop = answer * XNATOM * XABUND = {number[0, 0]:.6e}")
-        print(f"  Expected Fortran Fe I = ~400 cm⁻³")
 
 
 def compute_doppler_exact(
