@@ -51,17 +51,17 @@ The primary impact of this work is enabling direct integration of physically acc
 Validation against 100 randomly drawn atmosphere models spans a wide range of effective temperatures, surface gravities, and metallicities, including the challenging regimes of cool giants, metal-poor dwarfs, and hot O-type stars. Sub-percent fractional flux agreement is achieved across all wavelengths for every sample, with no Fortran required at runtime. This establishes PySynthe as suitable for production use in both large-scale spectroscopic surveys and precision stellar abundance analyses.
 
 # Figures
-![Comparison of solar atmosphere model (Teff=5777K, logg=4.44, [Fe/H]=0)](compare-at12_solar.png)
-*Figure 1: Comparison of the PySynthe-generated spectrum and the Fortran Synthe reference for a solar atmosphere.*
+![Cool atmosphere (Teff=2800 K, logg=2.50)](compare_at12_aaaaa_t02800g2.50.png)
+*Figure 1: PySynthe vs Fortran Synthe for a cool atmosphere (Teff=2800 K, logg=2.50).*
 
-![Comparison of cool giant atmosphere (Teff=3500K, logg=0.5, [Fe/H]=0)](compare-at12_coolgiant.png)
-*Figure 2: Residuals for a cool giant (low gravity, cool temperature) demonstrating PySynthe’s accuracy even for extended, molecule-rich atmospheres. Main differences trace to molecular bands in extremely cool stars.*
+![A-type dwarf (Teff=9750 K, logg=5.00)](compare_at12_aaaaa_t09750g5.00.png)
+*Figure 2: Comparison for an A-type dwarf (Teff=9750 K, logg=5.00).*
 
-![Comparison of metal-poor dwarf atmosphere (Teff=6200K, logg=4.0, [Fe/H]=-2.0)](compare-at12_mp6200.png)
-*Figure 3: Synthesis agreement for a metal-poor dwarf, showing that PySynthe correctly reproduces spectra for low-metallicity conditions where metal line opacity is much reduced.*
+![B-type star (Teff=18000 K, logg=4.50)](compare_at12_aaaaa_t18000g4.50.png)
+*Figure 3: Comparison for a B-type star (Teff=18000 K, logg=4.50).*
 
-![Comparison of hot O-star atmosphere (Teff=44000K, logg=4.5, [Fe/H]=0)](compare-at12_t44000g450.png)
-*Figure 4: Comparison for a hot, massive O-type star. The code robustly handles the high-energy regime including strong H and He lines and reproduces the continuum level and line strengths versus the Fortran Synthe output.*
+![O-type star (Teff=44000 K, logg=4.50)](compare_at12_aaaaa_t44000g4.50.png)
+*Figure 4: Comparison for a hot O-type star (Teff=44000 K, logg=4.50).*
 
 
 # AI usage disclosure
